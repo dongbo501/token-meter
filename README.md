@@ -78,4 +78,4 @@ python3 -m unittest discover -s tests -v
 python3 server.py
 ```
 
-本地启动默认绑定 127.0.0.1，密码文件位于 `data/admin-password`。测试使用本地模拟的模型接口与 Bark 服务。推送 main 后，GitHub Actions 运行测试并发布 `latest` 与 `sha-<短提交哈希>` 镜像标签。
+本地启动默认绑定 127.0.0.1，密码文件位于 `data/admin-password`。测试使用本地模拟的模型接口与 Bark 服务。推送 main 后，GitHub Actions 运行测试并更新公开的 `latest` 镜像。需要固定版本时，可使用镜像摘要或已发布的版本标签。
