@@ -1,15 +1,17 @@
-import base64
 import fcntl
 import hmac
 import json
 import os
 import secrets
 import signal
+import sqlite3
 import threading
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from auth import COOKIE, SESSION_TTL, Auth
 from ledger import Ledger
 from metering import number
 from worker import Worker, complete
@@ -20,7 +22,15 @@ ASSETS = {
     "/app.js": ("app.js", "text/javascript"),
     "/style.css": ("style.css", "text/css"),
     "/mark.svg": ("mark.svg", "image/svg+xml"),
+    "/login.js": ("login.js", "text/javascript"),
+    "/login.css": ("login.css", "text/css"),
 }
+# Files are immutable for the lifetime of a deployed process. Avoid rereading
+# the container layer on every page load; private responses remain no-store.
+ASSET_CONTENT = {
+    path: ((STATIC / file).read_bytes(), mime) for path, (file, mime) in ASSETS.items()
+}
+LOGIN_PAGE = (STATIC / "login.html").read_text()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -29,7 +39,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # No credentials, query strings or provider responses in the access log.
 
-    def reply(self, status, content=b"", mime="application/json", auth=False):
+    def reply(self, status, content=b"", mime="application/json", headers=None):
         self.send_response(status)
         self.send_header("Content-Type", mime + "; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
@@ -41,10 +51,8 @@ class Handler(BaseHTTPRequestHandler):
             "default-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; "
             "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         )
-        if auth:
-            self.send_header(
-                "WWW-Authenticate", 'Basic realm="Token Meter", charset="UTF-8"'
-            )
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(content)
 
@@ -52,25 +60,50 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(status, json.dumps(obj, ensure_ascii=False).encode())
 
     def authorized(self):
-        if hmac.compare_digest(
-            self.headers.get("Authorization", "").encode(), self.server.credential
-        ):
+        self.session = self.server.auth.session(self.headers.get("Cookie"))
+        if self.session:
             return True
-        self.reply(401, "请使用 admin 和管理密码登录".encode(), "text/plain", True)
+        self.send_json({"error": "登录已过期，请重新登录"}, 401)
         return False
+
+    def login_page(self, message="", status=200):
+        content = LOGIN_PAGE.replace("{{csrf}}", self.server.auth.login_csrf)
+        content = content.replace("{{message}}", escape(message))
+        return self.reply(status, content.encode(), "text/html")
+
+    def cookie(self, token=""):
+        value = f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL if token else 0}"
+        # TLS terminates at the reverse proxy, which must overwrite this header.
+        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            value += "; Secure"
+        return value
+
+    def same_origin(self):
+        origin = self.headers.get("Origin")
+        return self.headers.get("Sec-Fetch-Site") != "cross-site" and (
+            not origin or urlsplit(origin).netloc == self.headers.get("Host")
+        )
 
     def do_GET(self):
         parts = urlsplit(self.path)
         if parts.path == "/healthz":
             return self.send_json({"ok": True})
+        if parts.path in {"/", "/login"}:
+            session = self.server.auth.session(self.headers.get("Cookie"))
+            if not session:
+                if parts.path == "/":
+                    return self.reply(303, headers={"Location": "/login"})
+                return self.login_page()
+            if parts.path == "/login":
+                return self.reply(303, headers={"Location": "/"})
+        if parts.path in ASSET_CONTENT:
+            content, mime = ASSET_CONTENT[parts.path]
+            return self.reply(200, content, mime)
         if not self.authorized():
             return
-        if parts.path in ASSETS:
-            file, mime = ASSETS[parts.path]
-            return self.reply(200, (STATIC / file).read_bytes(), mime)
         if parts.path == "/api/state":
             return self.send_json(
-                {**self.server.book.snapshot(), "csrf_token": self.server.csrf_token}
+                {**self.server.book.snapshot(), "csrf_token": self.session["csrf"]}
             )
         if parts.path == "/api/logs":
             try:
@@ -86,15 +119,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "资源不存在"}, 404)
 
     def do_POST(self):
+        self.connection.settimeout(10)
+        if not self.same_origin():
+            return self.send_json({"error": "请求来源无效"}, 403)
+        if self.path == "/api/login":
+            return self.login()
         if not self.authorized():
             return
         if not hmac.compare_digest(
-            self.headers.get("X-CSRF-Token", ""), self.server.csrf_token
+            self.headers.get("X-CSRF-Token", "").encode(), self.session["csrf"].encode()
         ):
             return self.send_json({"error": "页面令牌已失效，请刷新后重试"}, 403)
-        origin = self.headers.get("Origin")
-        if origin and urlsplit(origin).netloc != self.headers.get("Host"):
-            return self.send_json({"error": "请求来源无效"}, 403)
         if self.headers.get_content_type() != "application/json":
             return self.send_json({"error": "需要 JSON 请求"}, 415)
         try:
@@ -105,7 +140,12 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise TypeError("请求格式无效")
             book = self.server.book
-            if self.path == "/api/settings":
+            if self.path == "/api/logout":
+                self.server.auth.logout(self.headers.get("Cookie"))
+                return self.reply(
+                    200, b'{"ok":true}', headers={"Set-Cookie": self.cookie()}
+                )
+            elif self.path == "/api/settings":
                 book.save(data)
             elif self.path == "/api/probe":
                 job = book.reserve(probe=True)
@@ -133,6 +173,58 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
         except (TypeError, ValueError, UnicodeError) as err:
             self.send_json({"error": str(err)}, 400)
+        except (sqlite3.Error, OSError):
+            self.send_json({"error": "保存失败，请检查数据卷空间和权限后重试"}, 503)
+
+    def login(self):
+        is_json = self.headers.get_content_type() == "application/json"
+        try:
+            if self.headers.get_content_type() not in {
+                "application/json",
+                "application/x-www-form-urlencoded",
+            }:
+                return self.send_json({"error": "请求格式无效"}, 415)
+            size = int(self.headers.get("Content-Length", 0))
+            if not 0 < size <= 16384:
+                raise ValueError("请求大小无效")
+            raw = self.rfile.read(size).decode()
+            data = (
+                json.loads(raw)
+                if is_json
+                else {key: values[0] for key, values in parse_qs(raw).items()}
+            )
+            if not isinstance(data, dict):
+                raise TypeError("请求格式无效")
+            csrf = self.headers.get("X-CSRF-Token", data.get("csrf_token", ""))
+            if not isinstance(csrf, str) or not hmac.compare_digest(
+                csrf.encode(), self.server.auth.login_csrf.encode()
+            ):
+                message, status = "页面已过期，请刷新后重新登录", 403
+            else:
+                username, password = data.get("username"), data.get("password")
+                if not isinstance(username, str) or not isinstance(password, str):
+                    raise ValueError("请填写用户名和管理密码")
+                token, status = self.server.auth.login(
+                    username,
+                    password,
+                    self.client_address[0],
+                    self.headers.get("Cookie"),
+                )
+                if token:
+                    headers = {"Set-Cookie": self.cookie(token)}
+                    if is_json:
+                        return self.reply(200, b'{"ok":true}', headers=headers)
+                    return self.reply(303, headers={**headers, "Location": "/"})
+                message = (
+                    "登录尝试过多，请一分钟后重试"
+                    if status == 429
+                    else "用户名或密码不正确，请重试"
+                )
+        except (TypeError, ValueError, UnicodeError):
+            message, status = "请求格式无效，请重新填写", 400
+        if is_json:
+            return self.send_json({"error": message}, status)
+        return self.login_page(message, status)
 
 
 def main():
@@ -155,12 +247,13 @@ def main():
             int(os.getenv("WEEK_START", "0")),
             log_days=int(os.getenv("REQUEST_LOG_DAYS", "14")),
             log_limit=int(os.getenv("REQUEST_LOG_MAX_ROWS", "50000")),
+            storage_mode=os.getenv("STORAGE_MODE", "memory"),
+            checkpoint_seconds=int(os.getenv("CHECKPOINT_SECONDS", "300")),
         )
         http = ThreadingHTTPServer(
             (os.getenv("BIND", "127.0.0.1"), int(os.getenv("PORT", "8080"))), Handler
         )
-        http.credential = b"Basic " + base64.b64encode(("admin:" + password).encode())
-        http.csrf_token = secrets.token_urlsafe(32)
+        http.auth = Auth(password)
         http.book = book
         worker = Worker(book)
 
@@ -177,7 +270,7 @@ def main():
         finally:
             http.server_close()
             worker.close()
-            book.db.close()
+            book.close()
 
 
 if __name__ == "__main__":

@@ -444,8 +444,38 @@ class MeterTest(unittest.TestCase):
         self.book.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         before = self.path.stat().st_size
         self.book.maintenance(force=True)
+        self.assertLess(self.path.stat().st_size, before)
+        for _ in range(8):
+            self.book.maintenance(force=True)
         self.assertLess(self.path.stat().st_size, before // 2)
         self.assertEqual(self.book.snapshot()["totals"]["count"], 20)
+
+    def test_idle_polling_and_maintenance_do_not_write_or_truncate_wal(self):
+        self.book.maintenance(force=True)
+        wal = Path(str(self.path) + "-wal")
+        before = wal.read_bytes()
+        changes = self.book.db.total_changes
+        for _ in range(20):
+            self.book.reserve()
+            self.book.snapshot()
+            self.book.next_notice()
+            self.book.maintenance(force=True)
+        self.assertEqual(self.book.db.total_changes, changes)
+        self.assertEqual(wal.read_bytes(), before)
+        self.assertEqual(self.book.db.execute("PRAGMA synchronous").fetchone()[0], 2)
+
+    def test_maintenance_reclaims_at_most_256_pages_per_pass(self):
+        self.start()
+        for _ in range(20):
+            complete(self.book, self.book.reserve())
+        with self.book.db:
+            self.book.db.execute("UPDATE calls SET note=?", ("x" * 200000,))
+            self.book.db.execute("DELETE FROM calls")
+        before = self.book.db.execute("PRAGMA freelist_count").fetchone()[0]
+        self.assertGreater(before, 256)
+        self.book.maintenance(force=True)
+        after = self.book.db.execute("PRAGMA freelist_count").fetchone()[0]
+        self.assertEqual(before - after, 256)
 
     def test_low_disk_pauses_schedule(self):
         self.start()
@@ -502,6 +532,9 @@ class MeterTest(unittest.TestCase):
             def __init__(self, args, env, **kwargs):
                 self.env = env
                 test.assertNotIn("fixture", json.dumps(env))
+                test.assertEqual(Path(env["TMPDIR"]), Path(env["CODEX_HOME"]).parent)
+                test.assertTrue(Path(env["TMPDIR"]).is_dir())
+                test.assertIn('history.persistence="none"', args)
                 value = next(
                     a for a in args if a.startswith("model_providers.meter.base_url=")
                 )

@@ -127,12 +127,15 @@ async function api(path, body) {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-CSRF-Token": state.csrf_token,
+            "X-CSRF-Token": state?.csrf_token || "",
           },
           body: JSON.stringify(body),
         };
   const resp = await fetch("/api/" + path, opts);
-  if (resp.status === 401) throw Error("登录已失效，请刷新页面重新登录");
+  if (resp.status === 401) {
+    location.replace("/login?expired=1" + location.hash);
+    throw Error("登录已过期，正在返回登录页");
+  }
   const data = await resp.json();
   if (!resp.ok) throw Error(data.error || "请求失败");
   return data;
@@ -287,7 +290,7 @@ function render() {
   if (state.storage)
     label(
       "retention-info",
-      `明细保留 ${state.storage.log_days} 天，最多 ${number(state.storage.log_limit)} 条。自动估算沿用最近成功请求的用量和金额，首次无样本时按预留额度计算。数据库 ${(state.storage.bytes / 1048576).toFixed(1)} MiB。`,
+      `${state.storage.mode === "memory" ? `明细仅保留在内存，重启后清空；汇总每 ${state.storage.checkpoint_seconds} 秒保存。` : ""}明细保留 ${state.storage.log_days} 天，最多 ${number(state.storage.log_limit)} 条。自动估算沿用最近成功请求的用量和金额，首次无样本时按预留额度计算。磁盘数据 ${(state.storage.bytes / 1048576).toFixed(1)} MiB。`,
     );
   const c = state.config,
     totals = state.totals,
@@ -507,6 +510,17 @@ $("test-bark").onclick = async () => {
     await refresh();
   } catch (e) {
     announce(e.message, true);
+  }
+};
+$("logout").onclick = async () => {
+  $("logout").disabled = true;
+  try {
+    if (!state) state = await api("state");
+    await api("logout", {});
+    location.replace("/login");
+  } catch (e) {
+    announce(e.message, true);
+    $("logout").disabled = false;
   }
 };
 window.addEventListener("hashchange", () => {

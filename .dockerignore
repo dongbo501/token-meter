@@ -3,6 +3,7 @@
 !ledger.py
 !worker.py
 !server.py
+!auth.py
 !codex_runner.py
 !static/
 !static/**

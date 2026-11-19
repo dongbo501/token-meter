@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#f5f6f2" />
+    <title>登录 · Token Meter</title>
+    <link rel="icon" href="/mark.svg" />
+    <link rel="stylesheet" href="/login.css" />
+    <script defer src="/login.js"></script>
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="intro" aria-label="Token Meter">
+        <a class="brand" href="/"
+          ><img src="/mark.svg" alt="" width="36" height="36" />Token Meter</a
+        >
+        <div class="intro-copy">
+          <span class="eyebrow">用量有数 · 预算有度</span>
+          <h2>每一份用量，<br />都在掌握之中。</h2>
+          <p>从本周目标到每笔请求，<br />让你的 AI 用量清晰、有序。</p>
+        </div>
+        <svg
+          class="meter-art"
+          viewBox="0 0 360 200"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path
+            d="M40 185a140 140 0 0 1 280 0"
+            stroke="#496b57"
+            stroke-width="1"
+          />
+          <path
+            d="M60 185a120 120 0 0 1 240 0"
+            stroke="#496b57"
+            stroke-width="12"
+            stroke-dasharray="2 8"
+          />
+          <path
+            d="M85 185a95 95 0 0 1 190 0"
+            stroke="#315a44"
+            stroke-width="14"
+          />
+          <path
+            d="M85 185a95 95 0 0 1 162-67"
+            stroke="#c5ee85"
+            stroke-width="14"
+            stroke-linecap="round"
+          />
+          <path
+            d="M180 185l48-47"
+            stroke="#c5ee85"
+            stroke-width="3"
+            stroke-linecap="round"
+          />
+          <circle cx="180" cy="185" r="7" fill="#c5ee85" />
+        </svg>
+        <p class="intro-foot">你的服务 · 你的数据 · 你的节奏</p>
+      </section>
+      <section class="login-panel" aria-labelledby="login-title">
+        <div class="panel-label"><span></span>管理控制台</div>
+        <h1 id="login-title">欢迎回来</h1>
+        <p class="subtitle">登录，继续管理你的用量计划。</p>
+        <form id="login-form" action="/api/login" method="post">
+          <input type="hidden" name="csrf_token" value="{{csrf}}" />
+          <div class="field">
+            <label for="username">管理员账户</label>
+            <input
+              id="username"
+              name="username"
+              value="admin"
+              autocomplete="username"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              required
+            />
+          </div>
+          <div class="field">
+            <label for="password">管理密码</label>
+            <div class="password-wrap">
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                enterkeyhint="go"
+                aria-describedby="login-message"
+                required
+              />
+              <button
+                id="show-password"
+                type="button"
+                aria-label="显示密码"
+                aria-pressed="false"
+                aria-controls="password"
+                hidden
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  aria-hidden="true"
+                >
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <p id="login-message" class="login-message" role="status">
+            {{message}}
+          </p>
+          <button id="login-submit" class="submit" type="submit">
+            <span>登录控制台</span><span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <details class="login-help">
+          <summary>如何获取管理密码？</summary>
+          <p>
+            使用部署时设置的密码，或联系部署管理员。默认生成的密码可在容器终端通过
+            <code>cat /data/admin-password</code> 查看。
+          </p>
+        </details>
+        <p class="session-note">登录状态保留 12 小时，可随时退出。</p>
+      </section>
+    </main>
+    <footer>Token Meter <span>／</span> 自托管 AI 用量管理</footer>
+  </body>
+</html>

@@ -1,4 +1,4 @@
-"""Persistent weekly reservations. All state transitions commit under the same lock."""
+"""Serialized weekly accounting, with disk or periodically saved memory storage."""
 
 import json
 import shutil
@@ -31,23 +31,41 @@ class Ledger:
         clock=time.time,
         log_days=14,
         log_limit=50000,
+        storage_mode="disk",
+        checkpoint_seconds=300,
     ):
         if not 1 <= log_days <= 3650 or not 100 <= log_limit <= 1000000:
             raise ValueError(
                 "REQUEST_LOG_DAYS must be 1..3650; REQUEST_LOG_MAX_ROWS must be 100..1000000"
             )
         self.path = Path(path)
+        if storage_mode not in {"memory", "disk"}:
+            raise ValueError("STORAGE_MODE must be memory or disk")
+        if not 30 <= checkpoint_seconds <= 86400:
+            raise ValueError("CHECKPOINT_SECONDS must be 30..86400")
+        self.memory = storage_mode == "memory"
+        self.checkpoint_seconds = checkpoint_seconds
+        self.checkpoint_due = clock() + checkpoint_seconds
+        self.saved_changes = -1
         self.log_days, self.log_limit = log_days, log_limit
         self.maintenance_due = 0
         self.zone, self.start_day, self.clock = ZoneInfo(timezone), start_day, clock
         if not 0 <= start_day <= 6:
             raise ValueError("WEEK_START must be 0..6")
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = sqlite3.connect(
+            ":memory:" if self.memory else path, check_same_thread=False
+        )
         self.db.row_factory = sqlite3.Row
+        if self.memory and self.path.exists():
+            source = sqlite3.connect(path)
+            try:
+                source.backup(self.db)
+            finally:
+                source.close()
         # Enable physical reclamation on new databases and migrate old ones only
         # when there is enough free space for SQLite's one-time rebuild.
-        if self.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 0:
+        if not self.memory and self.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 0:
             self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
             size = self.path.stat().st_size
             if (
@@ -57,6 +75,9 @@ class Ledger:
                 self.db.execute("VACUUM")
         self.db.executescript("""
           PRAGMA journal_mode=WAL;
+          PRAGMA synchronous=FULL;
+          PRAGMA temp_store=MEMORY;
+          PRAGMA journal_size_limit=4194304;
           CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL,
             enabled INTEGER DEFAULT 0, reason TEXT DEFAULT '', retry REAL DEFAULT 0, failures INTEGER DEFAULT 0, tail_week TEXT DEFAULT '');
           CREATE TABLE IF NOT EXISTS calls (id INTEGER PRIMARY KEY, ts REAL NOT NULL, week TEXT NOT NULL,
@@ -125,6 +146,53 @@ class Ledger:
                     self.db.execute(
                         "UPDATE state SET reason='历史待核对记录已自动估算，可启动计划'"
                     )
+        if self.memory:
+            # No per-request fsync or filesystem I/O. The on-disk checkpoint
+            # remains a regular, atomic SQLite database for restart recovery.
+            self.db.execute("PRAGMA journal_mode=MEMORY")
+            self.db.execute("PRAGMA synchronous=OFF")
+            self.flush(force=True)
+
+    def flush(self, force=False):
+        """Save compact recovery state, excluding completed detail logs."""
+        if not self.memory:
+            return
+        with self.lock:
+            now = self.clock()
+            if not force and now < self.checkpoint_due:
+                return
+            if self.saved_changes == self.db.total_changes:
+                self.checkpoint_due = now + self.checkpoint_seconds
+                return
+            # Both the source and staging database live in RAM. Vacuum staging
+            # before writing so historical log pages never reach the data volume.
+            stage = sqlite3.connect(":memory:")
+            try:
+                self.db.backup(stage)
+                with stage:
+                    stage.execute(
+                        "DELETE FROM calls WHERE status NOT IN ('active','unknown')"
+                    )
+                stage.execute("VACUUM")
+                target = sqlite3.connect(self.path)
+                try:
+                    target.execute("PRAGMA synchronous=FULL")
+                    stage.backup(target)
+                finally:
+                    target.close()
+            except (sqlite3.Error, OSError):
+                with self.db:
+                    self._pause("数据快照保存失败，计划已暂停，请检查数据卷空间和权限")
+                self.checkpoint_due = now + 60
+                raise
+            finally:
+                stage.close()
+            self.saved_changes = self.db.total_changes
+            self.checkpoint_due = now + self.checkpoint_seconds
+
+    def close(self):
+        self.flush(force=True)
+        self.db.close()
 
     def maintenance(self, force=False):
         """Bound details independently of the durable daily budget aggregates."""
@@ -157,9 +225,15 @@ class Ledger:
                         "磁盘空间不足",
                         "数据卷剩余空间不足 128 MiB，计划已暂停。",
                     )
-            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
-            self.db.execute("PRAGMA incremental_vacuum").fetchall()
-            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            # Reuse the WAL instead of truncating/reallocating it every five
+            # minutes. SQLite checkpoints automatically at 1000 pages. Reclaim
+            # at most 256 free pages per pass, never rewrite an idle database.
+            if (
+                not self.memory
+                and self.db.execute("PRAGMA freelist_count").fetchone()[0]
+            ):
+                self.db.execute("PRAGMA incremental_vacuum(256)").fetchall()
+                self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
             self.maintenance_due = now + 300
 
     def storage_bytes(self):
@@ -242,6 +316,7 @@ class Ledger:
             if not cfg["bark_url"]:
                 self.db.execute("DELETE FROM notices WHERE delivered IS NULL")
             self.db.execute("UPDATE state SET config=? WHERE id=1", (json.dumps(cfg),))
+        self.flush(force=True)
 
     def switch(self, enable):
         with self.lock, self.db:
@@ -254,6 +329,7 @@ class Ledger:
                 self._goal_notice(self._window(self.clock()), cfg)
             else:
                 self._pause("已手动暂停")
+        self.flush(force=True)
 
     def _window(self, now):
         return week_of(now, self.zone, self.start_day).isoformat()
@@ -586,6 +662,8 @@ class Ledger:
                     "bytes": self.storage_bytes(),
                     "log_days": self.log_days,
                     "log_limit": self.log_limit,
+                    "mode": "memory" if self.memory else "disk",
+                    "checkpoint_seconds": self.checkpoint_seconds if self.memory else 0,
                 },
                 "config": cfg,
                 "ready": ready,

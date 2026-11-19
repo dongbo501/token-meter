@@ -224,6 +224,7 @@ def run_codex(book, job):
             "features.shell_tool": False,
             "features.multi_agent": False,
             "web_search": "disabled",
+            "history.persistence": "none",
         }
         args = [
             binary,
@@ -246,7 +247,13 @@ def run_codex(book, job):
         env = {
             key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ
         }
-        env.update(HOME=str(cli_home), CODEX_HOME=str(cli_home), METER_RELAY_KEY=token)
+        env.update(
+            HOME=str(cli_home),
+            CODEX_HOME=str(cli_home),
+            METER_RELAY_KEY=token,
+            TMPDIR=root,
+            XDG_CACHE_HOME=str(cli_home / "cache"),
+        )
         proc = None
         try:
             proc = subprocess.Popen(

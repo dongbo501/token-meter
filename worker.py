@@ -1,6 +1,7 @@
 import email.utils
 import json
 import logging
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -140,6 +141,13 @@ class Worker:
     def run(self):
         while not self.stop.is_set():
             self.book.maintenance()
+            try:
+                self.book.flush()
+            except (sqlite3.Error, OSError):
+                # flush pauses dispatch and schedules a bounded retry; keep the
+                # scheduler alive so recovery does not require a container restart.
+                self.stop.wait(1)
+                continue
             job = self.book.reserve()
             if job:
                 fut = self.pool.submit(complete, self.book, job)

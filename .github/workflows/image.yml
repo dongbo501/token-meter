@@ -30,7 +30,7 @@ jobs:
       - name: Verify container runtime and budget integration
         run: |
           docker run --rm token-meter:test codex --version
-          docker run --rm -v "$PWD/tests:/tests:ro" token-meter:test python -m unittest discover -s /tests -v
+          docker run --rm --tmpfs /tmp:size=256m,mode=1777 -v "$PWD/tests:/tests:ro" token-meter:test python -m unittest discover -s /tests -v
           docker compose config --quiet
       - uses: docker/login-action@v3
         with:

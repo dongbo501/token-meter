@@ -9,8 +9,12 @@ services:
       WEEK_START: "0"
       REQUEST_LOG_DAYS: "14"
       REQUEST_LOG_MAX_ROWS: "50000"
+      STORAGE_MODE: memory
+      CHECKPOINT_SECONDS: "300"
     volumes:
       - meter-data:/data
+    tmpfs:
+      - /tmp:size=256m,mode=1777
     restart: unless-stopped
     stop_grace_period: 150s
     logging:
