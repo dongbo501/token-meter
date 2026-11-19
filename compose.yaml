@@ -5,11 +5,12 @@ services:
     build: .
     pull_policy: missing
     ports:
-      - "127.0.0.1:${PANEL_PORT:-8080}:8080"
+      - "127.0.0.1:8080:8080"
+    dns:
+      - 172.17.0.1
     environment:
-      BILLING_TZ: ${BILLING_TZ:-Asia/Shanghai}
-      WEEK_START: ${WEEK_START:-0}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      BILLING_TZ: Asia/Shanghai
+      WEEK_START: "0"
     volumes:
       - meter-data:/data
     restart: unless-stopped

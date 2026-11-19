@@ -4,12 +4,12 @@
 
 ## 使用 GitHub 镜像
 
-需要 Docker。镜像支持 Linux AMD64 和 ARM64。私有镜像需要先用有包读取权限的 GitHub 账号登录 GHCR。已登录 GitHub CLI 且令牌具有 `read:packages` 或 `write:packages` 权限时，可以直接执行以下命令。
+镜像支持 Linux AMD64 和 ARM64。可以从 [GitHub Releases](https://github.com/dongbo501/token-meter/releases) 匿名下载，按发布页命令导入并启动。直接从 GHCR 拉取私有镜像时，可用有包读取权限的 GitHub 账号执行以下命令。
 
 ```sh
 gh auth token | docker login ghcr.io -u dongbo501 --password-stdin
 docker run -d --name token-meter --restart unless-stopped \
-  --stop-timeout 150 -p 127.0.0.1:8080:8080 \
+  --dns 172.17.0.1 --stop-timeout 150 -p 127.0.0.1:8080:8080 \
   -v token-meter-data:/data ghcr.io/dongbo501/token-meter:latest
 docker exec token-meter cat /data/admin-password
 ```
@@ -19,7 +19,7 @@ docker exec token-meter cat /data/admin-password
 ### 使用仓库中的 Compose
 
 ```sh
-gh repo clone dongbo501/token-meter
+git clone https://github.com/dongbo501/token-meter.git
 cd token-meter
 docker compose up -d --build
 docker compose exec panel cat /data/admin-password
@@ -52,14 +52,18 @@ docker compose exec panel cat /data/admin-password
 
 ## 部署配置
 
-| 变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `PANEL_PORT` | `8080` | Compose 的宿主机端口 |
-| `ADMIN_PASSWORD` | 首次启动随机生成 | 设置后使用该值登录，否则读取数据卷内的 `admin-password` |
-| `BILLING_TZ` | `Asia/Shanghai` | 与供应商账期一致的 IANA 时区 |
-| `WEEK_START` | `0` | 周起始日，0 为周一，6 为周日 |
+接口、密钥、预算、并发数和 Bark 通知均在网页「运行设置」中填写并保存到数据卷。部署参数直接写在 `compose.yaml` 中，无需创建 `.env` 文件。
 
-Compose 变量可写在仓库根目录的本地 `.env`。建议在首次运行前设定账期。默认端口仅绑定本机，远程管理可使用 SSH 隧道或 HTTPS 反向代理。反向代理应保留原始 Host 以支持同源检查。API Key、Bark 设备 Key 和账本存在数据卷中，拥有数据卷读取权限的管理员可以读取这些凭据。备份前请先停容器，并保护备份文件。
+| Compose 设置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `ports` | `127.0.0.1:8080:8080` | 中间的端口号是宿主机的监听端口 |
+| `dns` | `172.17.0.1` | 容器的上游 DNS 服务器 |
+| `environment.BILLING_TZ` | `Asia/Shanghai` | 与供应商账期一致的 IANA 时区 |
+| `environment.WEEK_START` | `"0"` | 周起始日，0 为周一，6 为周日 |
+
+修改部署参数后运行 `docker compose up -d` 使配置生效。旧部署若自定义过端口或账期，更新前请将对应值填入 Compose 文件。管理员密码默认从数据卷内的 `/data/admin-password` 读取，首次启动时生成；原先通过 `ADMIN_PASSWORD` 指定过密码的部署，可在重新创建容器前将原密码保存到该文件以继续使用。
+
+默认端口仅绑定本机，远程管理可使用 SSH 隧道或 HTTPS 反向代理。反向代理应保留原始 Host 以支持同源检查。API Key、Bark 设备 Key 和账本存在数据卷中，拥有数据卷读取权限的管理员可以读取这些凭据。备份前请先停容器，并保护备份文件。
 
 ## 开发与测试
 
