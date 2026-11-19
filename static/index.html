@@ -76,7 +76,7 @@
               </div>
             </div>
             <div class="budget-foot">
-              <span>在途及待核对 <b id="held">—</b></span
+              <span>在途预留 <b id="held">—</b></span
               ><span>预算上限 <b id="cap">—</b></span>
             </div>
           </section>
@@ -170,7 +170,7 @@
           <div class="card-head">
             <h2><i data-icon="list"></i>请求明细</h2>
             <label class="filter"
-              ><input id="only-unknown" type="checkbox" />仅待核对</label
+              ><input id="only-estimated" type="checkbox" />仅自动估算</label
             >
           </div>
           <p id="retention-info" class="log-retention"></p>
@@ -358,7 +358,9 @@
             </section>
             <section class="card form-card">
               <h2><i data-icon="bell"></i>Bark 通知</h2>
-              <p class="help">达到本周目标或接口请求出错时，推送到你的设备。</p>
+              <p class="help">
+                本周目标完成或发生需关注的错误时推送；自动估算静默处理。
+              </p>
               <div class="fields">
                 <label class="wide"
                   >Bark 推送地址<input
@@ -384,45 +386,5 @@
         </form>
       </section>
     </main>
-    <dialog id="resolve-dialog" aria-labelledby="resolve-title">
-      <form
-        id="resolve-form"
-        method="post"
-        action="/api/resolve"
-        aria-labelledby="resolve-title"
-      >
-        <h2 id="resolve-title">核对请求用量</h2>
-        <p class="help">按供应商账单录入。确认未扣费时，三项均填 0。</p>
-        <div class="fields">
-          <label class="wide"
-            >输入 token<input
-              type="number"
-              name="prompt"
-              min="0"
-              max="100000000"
-              required /></label
-          ><label
-            >其中缓存 token<input
-              type="number"
-              name="cached"
-              min="0"
-              required /></label
-          ><label
-            >输出 token<input
-              type="number"
-              name="output"
-              min="0"
-              max="100000000"
-              required
-          /></label>
-        </div>
-        <p class="error" id="resolve-error" role="alert"></p>
-        <div class="dialog-actions">
-          <button type="button" id="cancel-resolve" class="secondary">
-            取消</button
-          ><button class="primary">确认结算</button>
-        </div>
-      </form>
-    </dialog>
   </body>
 </html>

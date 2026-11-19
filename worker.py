@@ -89,7 +89,7 @@ def complete(book, job):
                 "rejected",
             )
         else:
-            book.failed(ident, f"HTTP {code} · 扣费情况未知，请核对账单")
+            book.failed(ident, f"HTTP {code} · 接口未返回有效用量")
         return
     except UPSTREAM_ERRORS as err:
         # Provider payloads and exception URLs may contain secrets. Store only a fixed category.
@@ -98,7 +98,7 @@ def complete(book, job):
             if isinstance(err, (ValueError, TypeError, RecursionError))
             else "连接中断或超时"
         )
-        book.failed(ident, f"{note}，请核对供应商账单")
+        book.failed(ident, note)
         return
     book.settle(ident, *counts)
 

@@ -53,12 +53,11 @@ const plans = {
   running: "运行中",
   tail: "预算余量不足",
   reached: "已达标",
-  backoff: "限流等待",
-  review: "待核对",
+  backoff: "自动重试等待",
 };
 const statuses = {
   active: "进行中",
-  unknown: "待核对",
+  estimated: "自动估算",
   done: "已结算",
   failed: "请求失败",
 };
@@ -76,7 +75,7 @@ const compact = (n) =>
     maximumFractionDigits: 1,
   }).format(n);
 const label = (id, value) => {
-  $(id).textContent = value;
+  if ($(id).textContent !== String(value)) $(id).textContent = value;
 };
 let state,
   page,
@@ -87,8 +86,7 @@ let state,
   logVersion = 0;
 let saving = false,
   probing = false;
-let resolveId,
-  notice = "",
+let notice = "",
   noticeBad = false,
   noticeUntil = 0;
 function tag(element, content, className) {
@@ -107,12 +105,8 @@ function banner() {
   let msg = Date.now() < noticeUntil ? notice : "";
   let warn = Boolean(msg && noticeBad);
   if (!msg && state) {
-    if (state.unknown) {
-      msg = `有 ${state.unknown} 笔请求待核对。请在“请求记录”中按供应商账单补录用量。`;
-      warn = true;
-    } else if (state.status === "backoff") {
-      msg = "供应商限流，预计 " + clock(state.retry) + " 后重试。";
-      warn = true;
+    if (state.status === "backoff") {
+      msg = "接口异常或限流，预计 " + clock(state.retry) + " 后自动继续。";
     } else if (state.status === "tail")
       msg = "剩余预算不足以发起下一笔请求。计划将在下个周期继续。";
     else if (state.note && !state.enabled && state.note !== "已手动暂停") {
@@ -207,14 +201,14 @@ function renderTable(container, items, full) {
     const cell = body.insertRow().insertCell();
     cell.colSpan = fields.length;
     cell.className = "empty";
-    const filtered = full && $("only-unknown").checked;
+    const filtered = full && $("only-estimated").checked;
     cell.append(
       icon("inbox"),
-      tag("b", filtered ? "没有待核对的请求" : "暂无请求记录"),
+      tag("b", filtered ? "没有自动估算的请求" : "暂无请求记录"),
       tag(
         "span",
         filtered
-          ? "需要核对的请求会出现在这里"
+          ? "缺少有效用量时，自动估算的请求会显示在这里"
           : "启动计划后，可在这里查看每笔请求的用量",
       ),
     );
@@ -244,7 +238,7 @@ function renderTable(container, items, full) {
       tag(
         "span",
         statuses[item.status],
-        "pill" + (["unknown", "failed"].includes(item.status) ? " bad" : ""),
+        "pill" + (["estimated", "failed"].includes(item.status) ? " bad" : ""),
       ),
     );
     if (full)
@@ -256,16 +250,6 @@ function renderTable(container, items, full) {
     if (full) {
       const td = add(item.note || "—");
       td.className = "note";
-      if (item.status === "unknown") {
-        const btn = tag("button", "核对", "secondary tiny");
-        btn.onclick = () => {
-          resolveId = item.id;
-          $("resolve-form").reset();
-          label("resolve-error", "");
-          $("resolve-dialog").showModal();
-        };
-        td.append(btn);
-      }
     }
   }
   wrap.append(table);
@@ -303,7 +287,7 @@ function render() {
   if (state.storage)
     label(
       "retention-info",
-      `明细保留 ${state.storage.log_days} 天，最多 ${number(state.storage.log_limit)} 条；待核对请求保留至结算。数据库 ${(state.storage.bytes / 1048576).toFixed(1)} MiB。`,
+      `明细保留 ${state.storage.log_days} 天，最多 ${number(state.storage.log_limit)} 条。自动估算沿用最近成功请求的用量和金额，首次无样本时按预留额度计算。数据库 ${(state.storage.bytes / 1048576).toFixed(1)} MiB。`,
     );
   const c = state.config,
     totals = state.totals,
@@ -347,7 +331,14 @@ function render() {
     document.createTextNode(String(state.active)),
     tag("small", " / " + c.concurrency),
   );
-  label("call-detail", "本周已结算 " + number(totals.count) + " 笔请求");
+  label(
+    "call-detail",
+    "本周已结算 " +
+      number(totals.count) +
+      " 笔 · 自动估算 " +
+      number(totals.estimated_count || 0) +
+      " 笔",
+  );
   label("plan-model", c.model || "待配置");
   label("plan-mode", usd ? "美元金额" : "Token 总量");
   label("plan-reset", state.next_week + " 00:00");
@@ -401,7 +392,10 @@ async function loadLogs(append = false) {
   const version = ++logVersion;
   const before = append && logItems.length ? logItems.at(-1).id : 0;
   const result = await api(
-    "logs?unknown=" + Number($("only-unknown").checked) + "&before=" + before,
+    "logs?estimated=" +
+      Number($("only-estimated").checked) +
+      "&before=" +
+      before,
   );
   if (version !== logVersion || page !== "logs") return;
   logItems = append ? logItems.concat(result.rows) : result.rows;
@@ -419,7 +413,6 @@ async function refresh() {
     if (
       page === "logs" &&
       logItems.length <= 40 &&
-      !$("resolve-dialog").open &&
       !document.activeElement?.closest("#full-table")
     )
       await loadLogs();
@@ -503,7 +496,7 @@ $("test-provider").onclick = async () => {
     render();
   }
 };
-$("only-unknown").onchange = () =>
+$("only-estimated").onchange = () =>
   loadLogs().catch((e) => announce(e.message, true));
 $("more-logs").onclick = () =>
   loadLogs(true).catch((e) => announce(e.message, true));
@@ -514,22 +507,6 @@ $("test-bark").onclick = async () => {
     await refresh();
   } catch (e) {
     announce(e.message, true);
-  }
-};
-$("cancel-resolve").onclick = () => $("resolve-dialog").close();
-$("resolve-form").onsubmit = async (e) => {
-  e.preventDefault();
-  try {
-    await api("resolve", {
-      id: resolveId,
-      ...Object.fromEntries(new FormData(e.target)),
-    });
-    $("resolve-dialog").close();
-    await refresh();
-    await loadLogs();
-    announce("用量已按账单结算");
-  } catch (err) {
-    label("resolve-error", err.message);
   }
 };
 window.addEventListener("hashchange", () => {

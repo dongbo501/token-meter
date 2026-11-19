@@ -168,33 +168,147 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(self.book.snapshot()["pending_notices"], 0)
         self.assertIsNotNone(self.book.reserve())
 
-    def test_missing_usage_manual_reconciliation(self):
+    def test_missing_usage_uses_last_success_and_continues_silently(self):
         self.start()
+        first = self.book.reserve()
+        complete(self.book, first)
+        actual = self.book.logs()["rows"][0]
         self.server.reply = 200, {"choices": []}
         job = self.book.reserve()
         complete(self.book, job)
-        self.assertEqual(self.book.snapshot()["unknown"], 1)
-        self.assertGreater(self.book.snapshot()["held_usd"], 0)
+        state = self.book.snapshot()
+        estimated = state["recent"][0]
+        self.assertEqual(estimated["status"], "estimated")
+        for field in ("prompt", "cached", "output", "pico"):
+            self.assertEqual(estimated[field], actual[field])
+        self.assertIn(f"#{first[0]}", estimated["note"])
+        self.assertEqual(state["unknown"], 0)
+        self.assertEqual(state["held_tokens"], 0)
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["pending_notices"], 0)
+        self.assertEqual(state["totals"]["estimated_count"], 1)
+        self.assertEqual(state["totals"]["pico"], actual["pico"] * 2)
+        self.assertEqual(state["totals"]["cached"], actual["cached"])
+        self.assertEqual(state["totals"]["reported_input"], actual["prompt"])
+        self.assertEqual(self.book.logs(estimated=True)["rows"], [estimated])
+        self.assertIsNone(self.book.reserve())
+        self.now += timedelta(seconds=6)
+        self.assertIsNotNone(self.book.reserve())
         with self.assertRaises(ValueError):
-            self.book.switch(True)
-        self.book.settle(job[0], 40, 2, 10, manual=True)
-        with self.assertRaises(ValueError):
-            self.book.settle(job[0], 40, 2, 10, manual=True)
-        self.assertEqual(self.book.snapshot()["held_tokens"], 0)
-        self.assertEqual(self.book.snapshot()["totals"]["count"], 1)
-        self.book.switch(True)
+            self.book.settle(job[0], 40, 2, 10)
 
-    def test_interrupted_job_is_held_across_week_boundary(self):
+    def test_missing_usage_without_success_uses_reservation(self):
+        self.start()
+        self.server.reply = 200, {}
+        job = self.book.reserve()
+        held = self.book.snapshot()
+        complete(self.book, job)
+        state = self.book.snapshot()
+        row = state["recent"][0]
+        self.assertEqual(row["prompt"] + row["output"], held["held_tokens"])
+        self.assertEqual(row["usd"], held["held_usd"])
+        self.assertIn("预留", row["note"])
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["pending_notices"], 0)
+        self.assertEqual(state["held_usd"], 0)
+        self.assertEqual(state["totals"]["reported_input"], 0)
+        self.assertEqual(
+            self.book.db.execute("SELECT count(*) FROM success_samples").fetchone()[0],
+            0,
+        )
+
+    def test_interrupted_job_is_estimated_in_original_week(self):
         self.start()
         job = self.book.reserve()
         self.book.db.close()
         self.now += timedelta(days=7)
         self.book = self.open()
-        self.assertEqual(self.book.snapshot()["status"], "review")
-        self.assertIsNone(self.book.reserve())
-        self.assertEqual(self.book.snapshot()["pending_notices"], 1)
-        self.book.settle(job[0], 50, 0, 22, manual=True)
-        self.assertEqual(self.book.snapshot()["spent"], 0)
+        state = self.book.snapshot()
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["status"], "backoff")
+        self.assertEqual(state["recent"][0]["status"], "estimated")
+        self.assertEqual(state["spent"], 0)
+        self.assertEqual(state["pending_notices"], 0)
+        self.now += timedelta(seconds=6)
+        self.assertIsNotNone(self.book.reserve())
+        old = self.book.db.execute(
+            "SELECT * FROM calls WHERE id=?", (job[0],)
+        ).fetchone()
+        self.assertEqual(self.book._summary(old["week"])["estimated_count"], 1)
+
+    def test_upgrade_resolves_old_unknown_rows_and_discards_queued_errors(self):
+        self.start()
+        complete(self.book, self.book.reserve())
+        job = self.book.reserve()
+        with self.book.db:
+            self.book.db.execute(
+                "UPDATE calls SET status='unknown' WHERE id=?", (job[0],)
+            )
+            self.book._pause("请在请求记录中核对账单")
+            self.book._notice(f"error/{job[0]}", "请求出错", "请核对")
+            self.book.db.execute("DELETE FROM success_samples")
+        self.book.db.close()
+        self.book = self.open()
+        state = self.book.snapshot()
+        self.assertFalse(state["enabled"])
+        self.assertEqual(state["unknown"], 0)
+        self.assertEqual(state["recent"][0]["status"], "estimated")
+        self.assertEqual(state["recent"][0]["pico"], state["recent"][1]["pico"])
+        self.assertEqual(state["pending_notices"], 0)
+        self.book.switch(True)
+        self.book.db.close()
+        self.book = self.open()
+        self.assertEqual(self.book.snapshot()["totals"]["count"], 2)
+
+    def test_repeated_errors_do_not_use_estimates_as_samples(self):
+        self.start()
+        first = self.book.reserve()
+        complete(self.book, first)
+        jobs = [self.book.reserve() for _ in range(3)]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(lambda j: self.book.failed(j[0], "fixture timeout"), jobs))
+        self.book.failed(jobs[0][0], "duplicate callback")
+        state = self.book.snapshot()
+        self.assertEqual(state["totals"]["count"], 4)
+        self.assertEqual(state["totals"]["estimated_count"], 3)
+        self.assertEqual(state["pending_notices"], 0)
+        self.assertTrue(state["enabled"])
+        for row in self.book.logs(estimated=True)["rows"]:
+            self.assertIn(f"#{first[0]}", row["note"])
+
+    def test_automatic_estimate_does_not_override_manual_pause(self):
+        self.start()
+        job = self.book.reserve()
+        self.book.switch(False)
+        self.book.failed(job[0], "fixture timeout")
+        self.assertFalse(self.book.snapshot()["enabled"])
+        self.assertEqual(self.book.snapshot()["note"], "已手动暂停")
+
+    def test_http_503_and_timeout_are_estimated_without_bark(self):
+        self.start()
+        self.server.reply = 503, {}
+        complete(self.book, self.book.reserve())
+        self.now += timedelta(seconds=6)
+        job = self.book.reserve()
+        with patch("worker.post", side_effect=TimeoutError):
+            complete(self.book, job)
+        state = self.book.snapshot()
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["totals"]["estimated_count"], 2)
+        self.assertEqual(state["pending_notices"], 0)
+
+    def test_estimate_can_complete_goal_but_only_sends_completion_notice(self):
+        self.start(usd_target=0.01, usd_limit=0.02, input_price=100, output_price=100)
+        job = self.book.reserve()
+        self.book.settle(job[0], 30, 0, 20)
+        self.book.failed(self.book.reserve()[0], "fixture timeout")
+        state = self.book.snapshot()
+        self.assertEqual(state["status"], "reached")
+        self.assertEqual(state["spent"], 0.01)
+        self.assertEqual(state["pending_notices"], 1)
+        row, _ = self.book.next_notice()
+        self.assertEqual(row["title"], "本周用量目标已完成")
+        self.assertIn("自动估算 1 笔", row["body"])
 
     def test_bad_key_releases_reservation_and_notifies(self):
         self.start()
@@ -284,20 +398,22 @@ class MeterTest(unittest.TestCase):
         self.book.switch(True)
         self.assertEqual(self.book.snapshot()["pending_notices"], 0)
 
-    def test_retention_preserves_budget_and_unresolved_requests(self):
+    def test_retention_preserves_estimated_totals_and_last_real_sample(self):
         self.start()
-        completed = self.book.reserve()
-        complete(self.book, completed)
-        unresolved = self.book.reserve()
-        self.book.failed(unresolved[0], "fixture timeout")
-        original_pico = self.book.snapshot()["totals"]["pico"]
+        first = self.book.reserve()
+        complete(self.book, first)
+        self.book.failed(self.book.reserve()[0], "fixture timeout")
+        original = self.book.snapshot()["totals"]
         with self.book.db:
             self.book.db.execute("UPDATE calls SET ts=ts-20*86400")
         self.book.maintenance(force=True)
-        rows = self.book.logs()["rows"]
-        self.assertEqual([row["id"] for row in rows], [unresolved[0]])
-        self.assertEqual(self.book.snapshot()["totals"]["pico"], original_pico)
-        self.assertGreater(self.book.snapshot()["held_tokens"], 0)
+        self.assertEqual(self.book.logs()["rows"], [])
+        self.assertEqual(self.book.snapshot()["totals"], original)
+        self.now += timedelta(seconds=6)
+        self.book.failed(self.book.reserve()[0], "another timeout")
+        row = self.book.logs()["rows"][0]
+        self.assertIn(f"#{first[0]}", row["note"])
+        self.assertEqual(row["pico"], original["pico"] // 2)
 
     def test_log_cap_and_request_ids_survive_pruning(self):
         self.start()

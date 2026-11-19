@@ -77,7 +77,9 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(parts.query)
                 before = number(query.get("before", [0])[0], "游标", 0, 2**63 - 1)
                 return self.send_json(
-                    self.server.book.logs(before, query.get("unknown") == ["1"])
+                    self.server.book.logs(
+                        before, estimated=query.get("estimated") == ["1"]
+                    )
                 )
             except ValueError as exc:
                 return self.send_json({"error": str(exc)}, 400)
@@ -126,12 +128,6 @@ class Handler(BaseHTTPRequestHandler):
                 book.switch(self.path == "/api/start")
             elif self.path == "/api/bark-test":
                 book.test_notice()
-            elif self.path == "/api/resolve":
-                ident = number(data.get("id"), "请求 ID", 1, 2**63 - 1)
-                prompt = number(data.get("prompt"), "输入用量", 0, 10**8)
-                cached = number(data.get("cached"), "缓存用量", 0, prompt)
-                output = number(data.get("output"), "输出用量", 0, 10**8)
-                book.settle(ident, prompt, cached, output, manual=True)
             else:
                 return self.send_json({"error": "资源不存在"}, 404)
             self.send_json({"ok": True})

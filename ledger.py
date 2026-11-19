@@ -69,6 +69,8 @@ class Ledger:
           CREATE INDEX IF NOT EXISTS pending_notices ON notices(retry,id) WHERE delivered IS NULL;
           CREATE TABLE IF NOT EXISTS daily (week TEXT, day TEXT, prompt INTEGER, cached INTEGER,
             reported_input INTEGER, output INTEGER, pico INTEGER, count INTEGER, PRIMARY KEY(week,day));
+          CREATE TABLE IF NOT EXISTS success_samples (model TEXT, rates TEXT, prompt INTEGER,
+            cached INTEGER, output INTEGER, pico INTEGER, source_id INTEGER, PRIMARY KEY(model,rates));
         """)
         with self.db:
             state_columns = {
@@ -84,6 +86,14 @@ class Ledger:
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(calls)")}
             if "reserved_output" not in columns:
                 self.db.execute("ALTER TABLE calls ADD COLUMN reserved_output INTEGER")
+            daily_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(daily)")
+            }
+            for name in ("estimated_count", "estimated_pico"):
+                if name not in daily_columns:
+                    self.db.execute(
+                        f"ALTER TABLE daily ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0"
+                    )
             self.db.execute(
                 "INSERT OR IGNORE INTO state(id,config) VALUES(1,?)",
                 (json.dumps(DEFAULTS),),
@@ -95,19 +105,25 @@ class Ledger:
                 self.db.execute(
                     "UPDATE state SET config=? WHERE id=1", (json.dumps(saved),)
                 )
-            interrupted_ids = self.db.execute(
-                "SELECT id FROM calls WHERE status='active'"
+            # Keep real samples beyond detail-log retention; estimates never seed samples.
+            self.db.execute("""INSERT OR IGNORE INTO success_samples
+                SELECT model,rates,prompt,cached,output,pico,id FROM calls WHERE status='done'
+                AND id IN (SELECT max(id) FROM calls WHERE status='done' GROUP BY model,rates)""")
+            pending = self.db.execute(
+                "SELECT * FROM calls WHERE status IN ('active','unknown') ORDER BY id"
             ).fetchall()
-            interrupted = self.db.execute(
-                "UPDATE calls SET status='unknown',note='服务在请求结算前重启' WHERE status='active'"
-            )
-            if interrupted.rowcount:
-                self._pause("存在中断的请求，请在请求记录中核对账单")
-                for row in interrupted_ids:
-                    self._notice(
-                        f"error/{row['id']}",
-                        "请求中断",
-                        f"请求 #{row['id']} 在结算前重启，请核对供应商账单。",
+            for row in pending:
+                self._estimate(
+                    row,
+                    "服务在请求结算前重启"
+                    if row["status"] == "active"
+                    else "升级自动处理历史待核对请求",
+                )
+            if pending:
+                self._backoff()
+                if "核对" in self._state()["reason"]:
+                    self.db.execute(
+                        "UPDATE state SET reason='历史待核对记录已自动估算，可启动计划'"
                     )
 
     def maintenance(self, force=False):
@@ -118,12 +134,12 @@ class Ledger:
                 return
             with self.db:
                 self.db.execute(
-                    "DELETE FROM calls WHERE status IN ('done','failed') AND ts<?",
+                    "DELETE FROM calls WHERE status IN ('done','failed','estimated') AND ts<?",
                     (now - self.log_days * 86400,),
                 )
                 self.db.execute(
                     """DELETE FROM calls WHERE id IN (SELECT id FROM calls
-                    WHERE status IN ('done','failed') ORDER BY id DESC LIMIT -1 OFFSET ?)""",
+                    WHERE status IN ('done','failed','estimated') ORDER BY id DESC LIMIT -1 OFFSET ?)""",
                     (self.log_limit,),
                 )
                 goal_prefix = f"goal/{self._window(now)}/%"
@@ -172,7 +188,7 @@ class Ledger:
             self._notice(
                 f"goal/{week}/{cfg['mode']}/{target}",
                 "本周用量目标已完成",
-                f"周期 {week} · 已结算 {amount}",
+                f"周期 {week} · 已结算 {amount}（含自动估算 {self._summary(week)['estimated_count']} 笔）",
             )
 
     def test_notice(self):
@@ -232,10 +248,6 @@ class Ledger:
             if enable:
                 if shutil.disk_usage(self.path.parent).free < 128 * 1024**2:
                     raise ValueError("数据卷剩余空间不足 128 MiB，请释放磁盘空间")
-                if self.db.execute(
-                    "SELECT 1 FROM calls WHERE status='unknown' LIMIT 1"
-                ).fetchone():
-                    raise ValueError("请先在请求记录中核对待确认的用量")
                 cfg = json.loads(self._state()["config"])
                 configure(cfg, {})
                 self.db.execute("UPDATE state SET enabled=1,reason='',tail_week=''")
@@ -250,7 +262,9 @@ class Ledger:
         return self.db.execute(
             """SELECT coalesce(sum(prompt),0) AS prompt,coalesce(sum(output),0) AS output,
             coalesce(sum(pico),0) AS pico,coalesce(sum(cached),0) AS cached,coalesce(sum(count),0) AS count,
-            coalesce(sum(reported_input),0) AS reported_input FROM daily WHERE week=?""",
+            coalesce(sum(reported_input),0) AS reported_input,
+            coalesce(sum(estimated_count),0) AS estimated_count,
+            coalesce(sum(estimated_pico),0) AS estimated_pico FROM daily WHERE week=?""",
             (week,),
         ).fetchone()
 
@@ -279,10 +293,10 @@ class Ledger:
                 if (
                     s["enabled"]
                     or self.db.execute(
-                        "SELECT 1 FROM calls WHERE status IN ('active','unknown') LIMIT 1"
+                        "SELECT 1 FROM calls WHERE status='active' LIMIT 1"
                     ).fetchone()
                 ):
-                    raise ValueError("请先暂停计划，等待在途请求完成并核对未知用量")
+                    raise ValueError("请先暂停计划，等待在途请求完成")
                 configure(json.loads(s["config"]), {})
             week = self._window(now)
             if s["tail_week"] == week:
@@ -372,31 +386,86 @@ class Ledger:
             )
             return out
 
-    def settle(self, ident, prompt, cached, output, manual=False):
+    def _record(self, row, prompt, cached, output, pico, note="", estimated=False):
+        """Commit a single settlement and its aggregate inside the caller's transaction."""
+        self.db.execute(
+            "UPDATE calls SET status=?,prompt=?,cached=?,output=?,pico=?,note=? WHERE id=?",
+            (
+                "estimated" if estimated else "done",
+                prompt,
+                cached,
+                output,
+                pico,
+                note,
+                row["id"],
+            ),
+        )
+        self.db.execute(
+            """INSERT INTO daily(week,day,prompt,cached,reported_input,output,pico,count,estimated_count,estimated_pico)
+            VALUES(?,?,?,?,?,?,?,1,?,?) ON CONFLICT(week,day) DO UPDATE SET
+            prompt=prompt+excluded.prompt,cached=cached+excluded.cached,reported_input=reported_input+excluded.reported_input,
+            output=output+excluded.output,pico=pico+excluded.pico,count=count+1,
+            estimated_count=estimated_count+excluded.estimated_count,estimated_pico=estimated_pico+excluded.estimated_pico""",
+            (
+                row["week"],
+                row["day"],
+                prompt,
+                0 if estimated else (cached or 0),
+                prompt if cached is not None and not estimated else 0,
+                output,
+                pico,
+                int(estimated),
+                pico if estimated else 0,
+            ),
+        )
+        self._goal_notice(row["week"], json.loads(self._state()["config"]))
+
+    def _estimate(self, row, reason):
+        sample = self.db.execute(
+            "SELECT * FROM success_samples WHERE model=? AND rates=?",
+            (row["model"], row["rates"]),
+        ).fetchone()
+        if sample:
+            prompt, cached, output, pico = (
+                sample[k] for k in ("prompt", "cached", "output", "pico")
+            )
+            basis = f"按最近成功请求 #{sample['source_id']} 的用量和金额自动估算"
+        else:
+            output = row["reserved_output"] or 0
+            prompt, cached, pico = (
+                max(0, row["reserved_t"] - output),
+                None,
+                row["reserved_p"],
+            )
+            basis = "暂无同模型同费率的成功记录，按本次预留用量和金额自动估算"
+        note = f"{reason} · {basis}"
+        self._record(row, prompt, cached, output, pico, note, estimated=True)
+        # Automatic estimates are silent, including queued errors from older versions.
+        self.db.execute(
+            "DELETE FROM notices WHERE event=? AND delivered IS NULL",
+            (f"error/{row['id']}",),
+        )
+
+    def _backoff(self, delay=0):
+        s = self._state()
+        seconds = max(delay, min(300, 5 * 2 ** min(s["failures"], 6)))
+        self.db.execute(
+            "UPDATE state SET retry=max(retry,?), failures=failures+1",
+            (self.clock() + seconds,),
+        )
+
+    def settle(self, ident, prompt, cached, output):
         with self.lock, self.db:
             row = self.db.execute("SELECT * FROM calls WHERE id=?", (ident,)).fetchone()
-            if not row or row["status"] != ("unknown" if manual else "active"):
+            if not row or row["status"] != "active":
                 raise ValueError("该请求的结算状态已改变，请刷新")
             pico = cost(prompt, cached, output, json.loads(row["rates"]))
+            self._record(row, prompt, cached, output, pico)
             self.db.execute(
-                """UPDATE calls SET status='done',prompt=?,cached=?,output=?,pico=?,note=? WHERE id=?""",
-                (prompt, cached, output, pico, "已按账单核对" if manual else "", ident),
+                """INSERT INTO success_samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(model,rates) DO UPDATE SET
+                prompt=excluded.prompt,cached=excluded.cached,output=excluded.output,pico=excluded.pico,source_id=excluded.source_id""",
+                (row["model"], row["rates"], prompt, cached, output, pico, ident),
             )
-            self.db.execute(
-                """INSERT INTO daily VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(week,day) DO UPDATE SET
-                prompt=prompt+excluded.prompt,cached=cached+excluded.cached,reported_input=reported_input+excluded.reported_input,
-                output=output+excluded.output,pico=pico+excluded.pico,count=count+1""",
-                (
-                    row["week"],
-                    row["day"],
-                    prompt,
-                    cached or 0,
-                    prompt if cached is not None else 0,
-                    output,
-                    pico,
-                ),
-            )
-            self._goal_notice(row["week"], json.loads(self._state()["config"]))
             output_overrun = (
                 row["reserved_output"] is not None and output > row["reserved_output"]
             )
@@ -417,41 +486,38 @@ class Ledger:
                     "请求用量超过预留",
                     f"请求 #{ident} 的实际用量超过预留，计划已暂停。",
                 )
-            elif not manual:
+            else:
                 self.db.execute(
                     "UPDATE state SET failures=0 WHERE retry<=?", (self.clock(),)
                 )
-            elif not self.db.execute(
-                "SELECT 1 FROM calls WHERE status='unknown' LIMIT 1"
-            ).fetchone():
-                self._pause("账单已核对，可重新启动计划")
 
     def failed(self, ident, note, kind="unknown", delay=0):
         with self.lock, self.db:
-            status = "unknown" if kind == "unknown" else "failed"
+            row = self.db.execute("SELECT * FROM calls WHERE id=?", (ident,)).fetchone()
+            if not row or row["status"] != "active":
+                return
+            if kind == "unknown":
+                self._estimate(row, note)
+                self._backoff(delay)
+                return
             changed = self.db.execute(
                 "UPDATE calls SET status=?,note=? WHERE id=? AND status='active'",
-                (status, note, ident),
+                ("failed", note, ident),
             )
             if not changed.rowcount:
                 return
             self._notice(f"error/{ident}", "接口请求出错", f"请求 #{ident} · {note}")
             if kind == "limited":
-                s = self._state()
-                seconds = max(delay, min(300, 5 * 2 ** min(s["failures"], 6)))
-                self.db.execute(
-                    "UPDATE state SET retry=max(retry,?), failures=failures+1",
-                    (self.clock() + seconds,),
-                )
+                self._backoff(delay)
             else:
                 self._pause(note)
 
-    def logs(self, before=0, unknown=False, limit=40):
+    def logs(self, before=0, estimated=False, limit=40):
         with self.lock:
             rows = self.db.execute(
                 """SELECT id,ts,model,status,prompt,cached,output,pico,note FROM calls
-                WHERE (?=0 OR id<?) AND (?=0 OR status='unknown') ORDER BY id DESC LIMIT ?""",
-                (before, before, int(unknown), limit + 1),
+                WHERE (?=0 OR id<?) AND (?=0 OR status='estimated') ORDER BY id DESC LIMIT ?""",
+                (before, before, int(estimated), limit + 1),
             ).fetchall()
             items = [
                 {
