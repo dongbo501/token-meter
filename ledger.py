@@ -1,10 +1,12 @@
 """Persistent weekly reservations. All state transitions commit under the same lock."""
 
 import json
+import shutil
 import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from metering import (
@@ -21,13 +23,38 @@ from metering import (
 
 
 class Ledger:
-    def __init__(self, path, timezone="Asia/Shanghai", start_day=0, clock=time.time):
+    def __init__(
+        self,
+        path,
+        timezone="Asia/Shanghai",
+        start_day=0,
+        clock=time.time,
+        log_days=14,
+        log_limit=50000,
+    ):
+        if not 1 <= log_days <= 3650 or not 100 <= log_limit <= 1000000:
+            raise ValueError(
+                "REQUEST_LOG_DAYS must be 1..3650; REQUEST_LOG_MAX_ROWS must be 100..1000000"
+            )
+        self.path = Path(path)
+        self.log_days, self.log_limit = log_days, log_limit
+        self.maintenance_due = 0
         self.zone, self.start_day, self.clock = ZoneInfo(timezone), start_day, clock
         if not 0 <= start_day <= 6:
             raise ValueError("WEEK_START must be 0..6")
         self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        # Enable physical reclamation on new databases and migrate old ones only
+        # when there is enough free space for SQLite's one-time rebuild.
+        if self.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 0:
+            self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            size = self.path.stat().st_size
+            if (
+                size
+                and shutil.disk_usage(self.path.parent).free > size * 2 + 128 * 1024**2
+            ):
+                self.db.execute("VACUUM")
         self.db.executescript("""
           PRAGMA journal_mode=WAL;
           CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL,
@@ -44,6 +71,16 @@ class Ledger:
             reported_input INTEGER, output INTEGER, pico INTEGER, count INTEGER, PRIMARY KEY(week,day));
         """)
         with self.db:
+            state_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(state)")
+            }
+            if "next_call_id" not in state_columns:
+                self.db.execute(
+                    "ALTER TABLE state ADD COLUMN next_call_id INTEGER NOT NULL DEFAULT 1"
+                )
+                self.db.execute(
+                    "UPDATE state SET next_call_id=(SELECT coalesce(max(id),0)+1 FROM calls)"
+                )
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(calls)")}
             if "reserved_output" not in columns:
                 self.db.execute("ALTER TABLE calls ADD COLUMN reserved_output INTEGER")
@@ -72,6 +109,49 @@ class Ledger:
                         "请求中断",
                         f"请求 #{row['id']} 在结算前重启，请核对供应商账单。",
                     )
+
+    def maintenance(self, force=False):
+        """Bound details independently of the durable daily budget aggregates."""
+        with self.lock:
+            now = self.clock()
+            if not force and now < self.maintenance_due:
+                return
+            with self.db:
+                self.db.execute(
+                    "DELETE FROM calls WHERE status IN ('done','failed') AND ts<?",
+                    (now - self.log_days * 86400,),
+                )
+                self.db.execute(
+                    """DELETE FROM calls WHERE id IN (SELECT id FROM calls
+                    WHERE status IN ('done','failed') ORDER BY id DESC LIMIT -1 OFFSET ?)""",
+                    (self.log_limit,),
+                )
+                goal_prefix = f"goal/{self._window(now)}/%"
+                self.db.execute(
+                    """DELETE FROM notices WHERE event NOT LIKE ? AND
+                    (created<? OR id IN (SELECT id FROM notices ORDER BY id DESC LIMIT -1 OFFSET 10000))""",
+                    (goal_prefix, now - 30 * 86400),
+                )
+                if shutil.disk_usage(self.path.parent).free < 128 * 1024**2:
+                    self._pause(
+                        "数据卷剩余空间不足 128 MiB，计划已暂停，请释放磁盘空间"
+                    )
+                    self._notice(
+                        f"disk/{self._window(now)}",
+                        "磁盘空间不足",
+                        "数据卷剩余空间不足 128 MiB，计划已暂停。",
+                    )
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            self.db.execute("PRAGMA incremental_vacuum").fetchall()
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            self.maintenance_due = now + 300
+
+    def storage_bytes(self):
+        return sum(
+            p.stat().st_size
+            for p in (self.path, Path(str(self.path) + "-wal"))
+            if p.exists()
+        )
 
     def _notice(self, event, title, body):
         if json.loads(self._state()["config"]).get("bark_url"):
@@ -120,8 +200,8 @@ class Ledger:
             now = self.clock()
             retry = now + min(3600, 5 * 2 ** min(10, row["attempts"]))
             self.db.execute(
-                "UPDATE notices SET delivered=?,attempts=attempts+1,retry=?,error=? WHERE id=?",
-                (None if error else now, retry, error, row["id"]),
+                "UPDATE notices SET delivered=?,attempts=attempts+1,retry=?,error=? WHERE id=? AND event=?",
+                (None if error else now, retry, error, row["id"], row["event"]),
             )
 
     def _state(self):
@@ -150,6 +230,8 @@ class Ledger:
     def switch(self, enable):
         with self.lock, self.db:
             if enable:
+                if shutil.disk_usage(self.path.parent).free < 128 * 1024**2:
+                    raise ValueError("数据卷剩余空间不足 128 MiB，请释放磁盘空间")
                 if self.db.execute(
                     "SELECT 1 FROM calls WHERE status='unknown' LIMIT 1"
                 ).fetchone():
@@ -248,11 +330,23 @@ class Ledger:
             out, tokens, pico = quote
             day = datetime.fromtimestamp(now, self.zone).date().isoformat()
             cur = self.db.execute(
-                """INSERT INTO calls(ts,week,day,model,status,reserved_t,reserved_p,rates,reserved_output)
-                VALUES(?,?,?,?,'active',?,?,?,?)""",
-                (now, week, day, cfg["model"], tokens, pico, json.dumps(rates), out),
+                """INSERT INTO calls(id,ts,week,day,model,status,reserved_t,reserved_p,rates,reserved_output)
+                VALUES(?,?,?,?,?,'active',?,?,?,?)""",
+                (
+                    s["next_call_id"],
+                    now,
+                    week,
+                    day,
+                    cfg["model"],
+                    tokens,
+                    pico,
+                    json.dumps(rates),
+                    out,
+                ),
             )
-            self.db.execute("UPDATE state SET reason='',tail_week=''")
+            self.db.execute(
+                "UPDATE state SET reason='',tail_week='',next_call_id=next_call_id+1"
+            )
             return cur.lastrowid, cfg, prompt, out
 
     def resize(self, ident, cfg, request_text):
@@ -422,6 +516,11 @@ class Ledger:
                 state = "setup"
             scale = PICO if cfg["mode"] == "usd" else 1
             return {
+                "storage": {
+                    "bytes": self.storage_bytes(),
+                    "log_days": self.log_days,
+                    "log_limit": self.log_limit,
+                },
                 "config": cfg,
                 "ready": ready,
                 "has_bark": has_bark,

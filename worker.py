@@ -139,6 +139,7 @@ class Worker:
 
     def run(self):
         while not self.stop.is_set():
+            self.book.maintenance()
             job = self.book.reserve()
             if job:
                 fut = self.pool.submit(complete, self.book, job)

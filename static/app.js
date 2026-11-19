@@ -300,6 +300,11 @@ function updateMode() {
 }
 function render() {
   if (!state) return;
+  if (state.storage)
+    label(
+      "retention-info",
+      `明细保留 ${state.storage.log_days} 天，最多 ${number(state.storage.log_limit)} 条；待核对请求保留至结算。数据库 ${(state.storage.bytes / 1048576).toFixed(1)} MiB。`,
+    );
   const c = state.config,
     totals = state.totals,
     usd = c.mode === "usd";

@@ -157,6 +157,8 @@ def main():
             directory / "meter.sqlite3",
             os.getenv("BILLING_TZ", "Asia/Shanghai"),
             int(os.getenv("WEEK_START", "0")),
+            log_days=int(os.getenv("REQUEST_LOG_DAYS", "14")),
+            log_limit=int(os.getenv("REQUEST_LOG_MAX_ROWS", "50000")),
         )
         http = ThreadingHTTPServer(
             (os.getenv("BIND", "127.0.0.1"), int(os.getenv("PORT", "8080"))), Handler

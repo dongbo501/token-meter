@@ -7,9 +7,16 @@ services:
     environment:
       BILLING_TZ: Asia/Shanghai
       WEEK_START: "0"
+      REQUEST_LOG_DAYS: "14"
+      REQUEST_LOG_MAX_ROWS: "50000"
     volumes:
       - meter-data:/data
     restart: unless-stopped
     stop_grace_period: 150s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   meter-data:

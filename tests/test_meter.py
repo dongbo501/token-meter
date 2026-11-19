@@ -284,6 +284,63 @@ class MeterTest(unittest.TestCase):
         self.book.switch(True)
         self.assertEqual(self.book.snapshot()["pending_notices"], 0)
 
+    def test_retention_preserves_budget_and_unresolved_requests(self):
+        self.start()
+        completed = self.book.reserve()
+        complete(self.book, completed)
+        unresolved = self.book.reserve()
+        self.book.failed(unresolved[0], "fixture timeout")
+        original_pico = self.book.snapshot()["totals"]["pico"]
+        with self.book.db:
+            self.book.db.execute("UPDATE calls SET ts=ts-20*86400")
+        self.book.maintenance(force=True)
+        rows = self.book.logs()["rows"]
+        self.assertEqual([row["id"] for row in rows], [unresolved[0]])
+        self.assertEqual(self.book.snapshot()["totals"]["pico"], original_pico)
+        self.assertGreater(self.book.snapshot()["held_tokens"], 0)
+
+    def test_log_cap_and_request_ids_survive_pruning(self):
+        self.start()
+        ids = []
+        for _ in range(6):
+            job = self.book.reserve()
+            ids.append(job[0])
+            complete(self.book, job)
+        self.book.log_limit = 3
+        self.book.maintenance(force=True)
+        self.assertEqual(
+            [row["id"] for row in self.book.logs()["rows"]], ids[-3:][::-1]
+        )
+        self.assertEqual(self.book.snapshot()["totals"]["count"], 6)
+        self.now += timedelta(days=20)
+        self.book.maintenance(force=True)
+        self.assertEqual(self.book.logs()["rows"], [])
+        self.assertGreater(self.book.reserve()[0], ids[-1])
+
+    def test_pruning_reclaims_sqlite_pages(self):
+        self.start()
+        for _ in range(20):
+            complete(self.book, self.book.reserve())
+        with self.book.db:
+            self.book.db.execute(
+                "UPDATE calls SET note=?,ts=ts-20*86400", ("x" * 50000,)
+            )
+        self.book.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        before = self.path.stat().st_size
+        self.book.maintenance(force=True)
+        self.assertLess(self.path.stat().st_size, before // 2)
+        self.assertEqual(self.book.snapshot()["totals"]["count"], 20)
+
+    def test_low_disk_pauses_schedule(self):
+        self.start()
+        space = type("Space", (), {"free": 64 * 1024**2})()
+        with patch("ledger.shutil.disk_usage", return_value=space):
+            self.book.maintenance(force=True)
+            self.assertFalse(self.book.snapshot()["enabled"])
+            with self.assertRaises(ValueError):
+                self.book.switch(True)
+        self.assertIn("磁盘空间", self.book.snapshot()["note"])
+
     def test_cli_reservation_uses_full_input_and_shared_cap(self):
         self.start(
             api_style="codex", mode="tokens", token_target=9000, token_limit=10000

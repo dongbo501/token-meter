@@ -550,6 +550,12 @@ dialog h2 {
   overflow: hidden;
   align-self: start;
 }
+.log-retention {
+  padding: 0 22px 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
 .log-card > .card-head {
   padding: 20px 23px;
 }
