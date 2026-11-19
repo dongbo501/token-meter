@@ -180,10 +180,43 @@
         </div>
       </section>
       <section id="settings" hidden aria-label="运行设置">
-        <form id="settings-form">
+        <form
+          id="settings-form"
+          method="post"
+          action="/api/settings"
+          aria-labelledby="page-title"
+        >
           <div class="settings-grid">
             <section class="card form-card">
               <h2><i data-icon="plug"></i>模型接口</h2>
+              <fieldset class="protocols" aria-describedby="protocol-help">
+                <legend>执行方式</legend>
+                <div>
+                  <input
+                    id="protocol-codex"
+                    type="radio"
+                    name="api_style"
+                    value="codex"
+                  /><label for="protocol-codex">官方 Codex CLI</label>
+                </div>
+                <div>
+                  <input
+                    id="protocol-responses"
+                    type="radio"
+                    name="api_style"
+                    value="responses"
+                  /><label for="protocol-responses">Responses API</label>
+                </div>
+                <div>
+                  <input
+                    id="protocol-chat"
+                    type="radio"
+                    name="api_style"
+                    value="chat"
+                  /><label for="protocol-chat">Chat Completions</label>
+                </div>
+              </fieldset>
+              <p class="help" id="protocol-help"></p>
               <div class="fields">
                 <label class="wide"
                   >接口地址<input
@@ -207,7 +240,7 @@
                     placeholder="使用供应商提供的模型 ID"
                     maxlength="256"
                 /></label>
-                <label
+                <label id="output-field-label"
                   >输出上限参数<select name="output_field">
                     <option>max_tokens</option>
                     <option>max_completion_tokens</option>
@@ -221,6 +254,15 @@
                     max="32768"
                     required
                 /></label>
+              </div>
+              <div class="bark-actions">
+                <button id="test-provider" class="secondary" type="button">
+                  测试已保存接口
+                </button>
+                <small
+                  >会计费并记入本周用量，请求输出上限为 32
+                  token；超限会提示。</small
+                >
               </div>
             </section>
             <section class="card form-card">
@@ -342,7 +384,12 @@
       </section>
     </main>
     <dialog id="resolve-dialog" aria-labelledby="resolve-title">
-      <form id="resolve-form">
+      <form
+        id="resolve-form"
+        method="post"
+        action="/api/resolve"
+        aria-labelledby="resolve-title"
+      >
         <h2 id="resolve-title">核对请求用量</h2>
         <p class="help">按供应商账单录入。确认未扣费时，三项均填 0。</p>
         <div class="fields">

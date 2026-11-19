@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from codex_runner import LocalReject, run_codex
 from metering import endpoint, usage
 
 logger = logging.getLogger(__name__)
@@ -49,17 +50,32 @@ def retry_after(value):
 def complete(book, job):
     ident, cfg, prompt, out = job
     try:
-        data = post(
-            endpoint(cfg["base_url"]),
-            {
+        if cfg["api_style"] == "codex":
+            counts = run_codex(book, job)
+        else:
+            payload = {
                 "model": cfg["model"],
                 "messages": [{"role": "user", "content": prompt}],
                 cfg["output_field"]: out,
                 "stream": False,
-            },
-            {"Authorization": "Bearer " + cfg["api_key"]},
-        )
-        counts = usage(data.get("usage") if isinstance(data, dict) else None)
+            }
+            if cfg["api_style"] == "responses":
+                payload = {
+                    "model": cfg["model"],
+                    "input": prompt,
+                    "max_output_tokens": out,
+                    "store": False,
+                    "stream": False,
+                }
+            data = post(
+                endpoint(cfg["base_url"], cfg["api_style"]),
+                payload,
+                {"Authorization": "Bearer " + cfg["api_key"]},
+            )
+            counts = usage(data.get("usage") if isinstance(data, dict) else None)
+    except LocalReject as err:
+        book.failed(ident, str(err), "rejected")
+        return
     except HTTPError as err:
         code = err.code
         wait = retry_after(err.headers.get("Retry-After")) if code == 429 else 0
@@ -69,7 +85,7 @@ def complete(book, job):
         elif code in {400, 401, 402, 403, 404, 405, 413, 415, 422} or 300 <= code < 400:
             book.failed(
                 ident,
-                f"HTTP {code} · 请求被拒绝，请检查接口、模型、参数和账户",
+                f"HTTP {code} · 请求被拒绝，请检查执行方式、接口、模型、参数和账户",
                 "rejected",
             )
         else:

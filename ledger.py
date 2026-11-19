@@ -44,10 +44,20 @@ class Ledger:
             reported_input INTEGER, output INTEGER, pico INTEGER, count INTEGER, PRIMARY KEY(week,day));
         """)
         with self.db:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(calls)")}
+            if "reserved_output" not in columns:
+                self.db.execute("ALTER TABLE calls ADD COLUMN reserved_output INTEGER")
             self.db.execute(
                 "INSERT OR IGNORE INTO state(id,config) VALUES(1,?)",
                 (json.dumps(DEFAULTS),),
             )
+            # Preserve the protocol of existing deployments during schema migration.
+            saved = json.loads(self._state()["config"])
+            if "api_style" not in saved:
+                saved["api_style"] = "chat"
+                self.db.execute(
+                    "UPDATE state SET config=? WHERE id=1", (json.dumps(saved),)
+                )
             interrupted_ids = self.db.execute(
                 "SELECT id FROM calls WHERE status='active'"
             ).fetchall()
@@ -178,15 +188,26 @@ class Ledger:
             )
         return dollars(cfg["usd_target"]), dollars(cfg["usd_limit"]), totals["pico"]
 
-    def reserve(self):
+    def reserve(self, probe=False):
         with self.lock, self.db:
             s, now = self._state(), self.clock()
-            if not s["enabled"] or now < s["retry"]:
+            if not probe and (not s["enabled"] or now < s["retry"]):
                 return
+            if probe:
+                if (
+                    s["enabled"]
+                    or self.db.execute(
+                        "SELECT 1 FROM calls WHERE status IN ('active','unknown') LIMIT 1"
+                    ).fetchone()
+                ):
+                    raise ValueError("请先暂停计划，等待在途请求完成并核对未知用量")
+                configure(json.loads(s["config"]), {})
             week = self._window(now)
             if s["tail_week"] == week:
                 return
             cfg = json.loads(s["config"])
+            if probe:
+                cfg["max_output"] = 32
             active = self.db.execute(
                 "SELECT count(*) FROM calls WHERE status='active'"
             ).fetchone()[0]
@@ -197,7 +218,12 @@ class Ledger:
             target, cap, spent = self._limits(cfg, self._summary(week))
             if spent + held >= target:
                 return
-            prompt = workload()
+            prompt = workload(cfg["api_style"])
+            if probe:
+                prompt = (
+                    prompt.split(" | ", 1)[0]
+                    + " Connection test. Reply exactly OK. Do not use tools."
+                )
             rates = prices(cfg)
             quote = allocation(cfg, prompt, cap - spent - held, rates)
             if not quote:
@@ -222,12 +248,35 @@ class Ledger:
             out, tokens, pico = quote
             day = datetime.fromtimestamp(now, self.zone).date().isoformat()
             cur = self.db.execute(
-                """INSERT INTO calls(ts,week,day,model,status,reserved_t,reserved_p,rates)
-                VALUES(?,?,?,?,'active',?,?,?)""",
-                (now, week, day, cfg["model"], tokens, pico, json.dumps(rates)),
+                """INSERT INTO calls(ts,week,day,model,status,reserved_t,reserved_p,rates,reserved_output)
+                VALUES(?,?,?,?,'active',?,?,?,?)""",
+                (now, week, day, cfg["model"], tokens, pico, json.dumps(rates), out),
             )
             self.db.execute("UPDATE state SET reason='',tail_week=''")
             return cur.lastrowid, cfg, prompt, out
+
+    def resize(self, ident, cfg, request_text):
+        """Reserve the complete CLI request under the same lock before network I/O."""
+        with self.lock, self.db:
+            row = self.db.execute("SELECT * FROM calls WHERE id=?", (ident,)).fetchone()
+            if not row or row["status"] != "active":
+                raise ValueError("请求已结束")
+            _, cap, spent = self._limits(cfg, self._summary(row["week"]))
+            ht, hp = self._held(row["week"])
+            held = (
+                hp - row["reserved_p"]
+                if cfg["mode"] == "usd"
+                else ht - row["reserved_t"]
+            )
+            quote = allocation(cfg, request_text, cap - spent - held, prices(cfg))
+            if not quote:
+                raise ValueError("剩余预算不足以容纳 Codex 的完整提示词，请调整上限")
+            out, tokens, pico = quote
+            self.db.execute(
+                "UPDATE calls SET reserved_t=?,reserved_p=?,reserved_output=? WHERE id=?",
+                (tokens, pico, out, ident),
+            )
+            return out
 
     def settle(self, ident, prompt, cached, output, manual=False):
         with self.lock, self.db:
@@ -254,8 +303,21 @@ class Ledger:
                 ),
             )
             self._goal_notice(row["week"], json.loads(self._state()["config"]))
-            if prompt + output > row["reserved_t"] or pico > row["reserved_p"]:
-                self._pause("实际用量超过请求预留，请检查供应商的计量方式")
+            output_overrun = (
+                row["reserved_output"] is not None and output > row["reserved_output"]
+            )
+            if (
+                prompt + output > row["reserved_t"]
+                or pico > row["reserved_p"]
+                or output_overrun
+            ):
+                note = (
+                    "供应商未遵守单次输出上限，计划已暂停，请核对计量方式"
+                    if output_overrun
+                    else "实际用量超过请求预留，请检查供应商的计量方式"
+                )
+                self._pause(note)
+                self.db.execute("UPDATE calls SET note=? WHERE id=?", (note, ident))
                 self._notice(
                     f"over/{ident}",
                     "请求用量超过预留",

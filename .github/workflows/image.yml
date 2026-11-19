@@ -2,7 +2,7 @@ name: Test and publish image
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -10,14 +10,28 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: "3.13"
       - run: python -m unittest discover -s tests -v
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+      - name: Build and test the runtime with the official CLI
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: token-meter:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify container runtime and budget integration
+        run: |
+          docker run --rm token-meter:test codex --version
+          docker run --rm -v "$PWD/tests:/tests:ro" token-meter:test python -m unittest discover -s /tests -v
+          docker compose config --quiet
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -38,3 +52,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

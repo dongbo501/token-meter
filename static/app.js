@@ -2,6 +2,17 @@
 
 const $ = (id) => document.getElementById(id);
 const form = $("settings-form");
+// Explicit label associations and input hints also help password managers.
+document.querySelectorAll("label > input, label > select").forEach((input) => {
+  input.id ||= "field-" + input.name;
+  input.parentElement.htmlFor = input.id;
+});
+for (const name of ["base_url", "model", "api_key", "bark_url"]) {
+  const input = form.elements[name];
+  input.autocapitalize = "none";
+  input.setAttribute("autocorrect", "off");
+  input.spellcheck = false;
+}
 const icons = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   list: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h1m3 0h6M7 14h1m3 0h6"/>',
@@ -74,6 +85,8 @@ let state,
   logItems = [],
   logMore = false,
   logVersion = 0;
+let saving = false,
+  probing = false;
 let resolveId,
   notice = "",
   noticeBad = false,
@@ -118,7 +131,10 @@ async function api(path, body) {
       ? {}
       : {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": state.csrf_token,
+          },
           body: JSON.stringify(body),
         };
   const resp = await fetch("/api/" + path, opts);
@@ -149,7 +165,7 @@ function renderChart(usd) {
   label("axis-max", compact(ceiling));
   label("axis-mid", compact(ceiling / 2));
   label("chart-unit", usd ? "USD" : "TOKEN");
-  label("chart-legend", usd ? "每日结算金额" : "每日结算 token");
+  label("chart-legend", usd ? "每日估算金额" : "每日结算 token");
   $("empty-chart").hidden = max > 0;
   $("bars").replaceChildren(
     ...state.days.map((d, i) => {
@@ -172,8 +188,8 @@ function renderChart(usd) {
 }
 function renderTable(container, items, full) {
   const fields = full
-    ? ["时间", "模型", "状态", "输入", "缓存", "输出", "美元", "详情"]
-    : ["时间", "模型", "状态", "Token", "美元"];
+    ? ["时间", "模型", "状态", "输入", "缓存", "输出", "估算美元", "详情"]
+    : ["时间", "模型", "状态", "Token", "估算美元"];
   const wrap = tag("div", null, "table-wrap");
   wrap.tabIndex = 0;
   wrap.setAttribute("role", "region");
@@ -259,7 +275,22 @@ function updateMode() {
   const usd = form.elements.mode.value === "usd";
   form.querySelectorAll("[data-mode]").forEach((el) => {
     el.hidden = (el.dataset.mode === "usd") !== usd;
+    el.querySelectorAll("input").forEach((input) => {
+      input.disabled = el.hidden;
+    });
   });
+  const style = form.elements.api_style.value;
+  $("output-field-label").hidden = style !== "chat";
+  form.elements.output_field.disabled = style !== "chat";
+  form.elements.max_output.min = style === "chat" ? "1" : "16";
+  label(
+    "protocol-help",
+    style === "codex"
+      ? "适用于仅允许编程客户端的供应商。使用官方 CLI 生成独立编程题，完整提示词计入预算。"
+      : style === "responses"
+        ? "直接使用 /v1/responses，供应商需允许脚本访问。"
+        : "直接使用 /v1/chat/completions，需选择模型支持的输出上限参数。",
+  );
   label(
     "plan-hint",
     usd
@@ -278,7 +309,7 @@ function render() {
   label("period", state.week + " — " + state.days.at(-1).day.slice(5));
   label("tz", state.timezone);
   label("plan-badge", plans[state.status]);
-  label("spend-label", usd ? "已结算金额 · USD" : "已结算用量 · TOKEN");
+  label("spend-label", usd ? "估算金额 · USD" : "已结算用量 · TOKEN");
   label("spend", display(state.spent));
   label("goal", display(state.target));
   label("cap", display(state.cap));
@@ -325,7 +356,10 @@ function render() {
     ),
   );
   $("save-btn").hidden = page !== "settings";
-  $("save-btn").disabled = state.enabled || state.active > 0;
+  $("save-btn").disabled =
+    saving || probing || state.enabled || state.active > 0;
+  $("test-provider").disabled =
+    probing || saving || !state.ready || state.enabled || state.active > 0;
   if (!dirty) {
     for (const [key, val] of Object.entries(c))
       if (form.elements[key]) form.elements[key].value = val ?? "";
@@ -428,6 +462,9 @@ form.oninput = () => {
 };
 form.onsubmit = async (e) => {
   e.preventDefault();
+  if (saving) return;
+  saving = true;
+  $("save-btn").disabled = true;
   const data = Object.fromEntries(new FormData(form));
   data.remove_bark = form.elements.remove_bark.checked;
   try {
@@ -437,6 +474,28 @@ form.onsubmit = async (e) => {
     announce("设置已保存");
   } catch (err) {
     announce(err.message, true);
+  } finally {
+    saving = false;
+    render();
+  }
+};
+$("test-provider").onclick = async () => {
+  if (probing) return;
+  probing = true;
+  render();
+  announce("正在测试已保存接口，请等待用量结算…");
+  try {
+    const result = await api("probe", {});
+    announce(
+      `连接成功 · 输入 ${result.prompt} · 输出 ${result.output} · 缓存 ${result.cached ?? "未报告"} token${result.warning ? " · " + result.warning : ""}`,
+      Boolean(result.warning),
+    );
+  } catch (e) {
+    announce(e.message, true);
+  } finally {
+    probing = false;
+    await refresh();
+    render();
   }
 };
 $("only-unknown").onchange = () =>

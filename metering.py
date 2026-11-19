@@ -12,6 +12,7 @@ DEFAULTS = {
     "base_url": "https://api.openai.com/v1",
     "model": "",
     "api_key": "",
+    "api_style": "codex",
     "bark_url": "",
     "mode": "usd",
     "usd_target": 600,
@@ -45,7 +46,7 @@ def number(value, label, low, high, places=0):
     return float(n) if places else int(n)
 
 
-def endpoint(base):
+def endpoint(base, style="chat"):
     url = urlsplit(base.strip())
     if (
         url.scheme not in {"https", "http"}
@@ -60,14 +61,17 @@ def endpoint(base):
         raise ValueError("接口地址格式无效")
     _ = url.port  # Validate the port before saving the configuration.
     path = url.path.rstrip("/") or "/v1"
-    if not path.endswith("/chat/completions"):
-        path += "/chat/completions"
+    for suffix in ("/chat/completions", "/responses"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    path += "/chat/completions" if style == "chat" else "/responses"
     return urlunsplit((url.scheme, url.netloc, path, "", ""))
 
 
 def configure(old, raw):
     c = dict(old)
-    for k in ("base_url", "model", "api_key", "mode", "output_field"):
+    for k in ("base_url", "model", "api_key", "mode", "output_field", "api_style"):
         value = raw.get(k, "")
         if not isinstance(value, str):
             raise TypeError("设置值须为文本")
@@ -115,6 +119,8 @@ def configure(old, raw):
         "max_completion_tokens",
     }:
         raise ValueError("预算模式或输出参数无效")
+    if c.get("api_style") not in {"chat", "responses", "codex"}:
+        raise ValueError("执行方式无效")
     limits = {
         "usd_target": ("美元目标", 0.01, 100000, 2),
         "usd_limit": ("美元上限", 0.01, 100000, 2),
@@ -128,6 +134,8 @@ def configure(old, raw):
     }
     for k, rules in limits.items():
         c[k] = number(raw.get(k, c[k]), *rules)
+    if c["api_style"] != "chat" and c["max_output"] < 16:
+        raise ValueError("Responses / Codex 的单次输出上限至少为 16")
     if c["usd_limit"] < c["usd_target"] or c["cached_price"] > c["input_price"]:
         raise ValueError("美元上限须至少等于目标，缓存单价须低于或等于普通输入单价")
     if c["token_limit"] < c["token_target"]:
@@ -160,7 +168,7 @@ def week_of(ts, zone, start_day):
     return day - timedelta(days=(day.weekday() - start_day) % 7)
 
 
-def workload():
+def workload(style="chat"):
     rng = random.SystemRandom()
     series = [rng.randrange(15, 2000) for _ in range(16)]
     domain = rng.choice(
@@ -183,6 +191,14 @@ def workload():
         ]
     )
     # Unique input begins at the first token, before any shared instructions.
+    if style == "codex":
+        return (
+            f"{secrets.token_hex(16)} | coding exercise | sample={json.dumps(series)}\n"
+            f"Implement a pure Python function to {question} for daily {domain}. "
+            "Provide the implementation, a worked example using the sample, edge-case unit tests, "
+            "complexity analysis and a review of numerical pitfalls. Return code and explanation "
+            "in your answer. Do not use tools, read files or execute anything."
+        )
     return (
         f"{secrets.token_hex(12)} | {domain} | {json.dumps(series)}\n"
         f"These are synthetic daily counts starting on a Monday. Use the values to {question}. "
@@ -202,7 +218,7 @@ def allocation(c, prompt, available, rates):
             return None
         if rates[2]:
             output = min(output, left // rates[2])
-    if output < 1:
+    if output < (1 if c.get("api_style", "chat") == "chat" else 16):
         return None
     return int(output), prompt_bound + output, cost(prompt_bound, 0, output, rates)
 
@@ -210,14 +226,18 @@ def allocation(c, prompt, available, rates):
 def usage(data):
     if not isinstance(data, dict):
         raise TypeError("接口没有返回有效的 usage")
-    prompt, output = data.get("prompt_tokens"), data.get("completion_tokens")
+    responses = "input_tokens" in data
+    prompt = data.get("input_tokens" if responses else "prompt_tokens")
+    output = data.get("output_tokens" if responses else "completion_tokens")
 
     def count(n):
         return type(n) is int and 0 <= n <= 10**8
 
     if not count(prompt) or not count(output) or not prompt + output:
         raise ValueError("接口没有返回有效的输入与输出用量")
-    details = data.get("prompt_tokens_details") or {}
+    details = (
+        data.get("input_tokens_details" if responses else "prompt_tokens_details") or {}
+    )
     cached = (
         details.get("cached_tokens", data.get("prompt_cache_hit_tokens"))
         if isinstance(details, dict)

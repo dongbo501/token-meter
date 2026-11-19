@@ -669,7 +669,7 @@ dialog h2 {
   color: #93522e;
 }
 .filter,
-.check-row {
+.check-row:not([hidden]) {
   display: flex !important;
   flex-direction: row !important;
   align-items: center;
@@ -714,12 +714,39 @@ dialog h2 {
 .fields select {
   width: 100%;
   padding: 10px 11px;
-  min-height: 40px;
+  min-height: 48px;
   background: #fcfdfa;
-  border: 1px solid #cdd6ca;
+  border: 1px solid #859582;
   border-radius: 7px;
   color: var(--ink);
-  font-size: 14px;
+  font-size: max(1rem, 1em);
+}
+.protocols {
+  border: 0;
+  padding: 0;
+  margin: 0 0 12px;
+}
+.protocols legend {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-block-end: 8px;
+}
+.protocols div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+}
+.protocols input {
+  accent-color: var(--green);
+}
+.protocols label {
+  font-size: 0.9rem;
+  padding-block: 12px;
+}
+.fields input:user-invalid {
+  border-color: #a34225;
+  outline: 1px solid #a34225;
 }
 .wide {
   grid-column: 1/-1;

@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from ledger import Ledger
 from metering import number
-from worker import Worker
+from worker import Worker, complete
 
 STATIC = Path(__file__).parent / "static"
 ASSETS = {
@@ -69,7 +69,9 @@ class Handler(BaseHTTPRequestHandler):
             file, mime = ASSETS[parts.path]
             return self.reply(200, (STATIC / file).read_bytes(), mime)
         if parts.path == "/api/state":
-            return self.send_json(self.server.book.snapshot())
+            return self.send_json(
+                {**self.server.book.snapshot(), "csrf_token": self.server.csrf_token}
+            )
         if parts.path == "/api/logs":
             try:
                 query = parse_qs(parts.query)
@@ -84,6 +86,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return
+        if not hmac.compare_digest(
+            self.headers.get("X-CSRF-Token", ""), self.server.csrf_token
+        ):
+            return self.send_json({"error": "页面令牌已失效，请刷新后重试"}, 403)
         origin = self.headers.get("Origin")
         if origin and urlsplit(origin).netloc != self.headers.get("Host"):
             return self.send_json({"error": "请求来源无效"}, 403)
@@ -99,6 +105,23 @@ class Handler(BaseHTTPRequestHandler):
             book = self.server.book
             if self.path == "/api/settings":
                 book.save(data)
+            elif self.path == "/api/probe":
+                job = book.reserve(probe=True)
+                if not job:
+                    raise ValueError("本周已达目标或剩余预算不足，无法进行计费测试")
+                complete(book, job)
+                row = book.logs(limit=1)["rows"][0]
+                if row["status"] != "done":
+                    raise ValueError(row["note"])
+                return self.send_json(
+                    {
+                        "ok": True,
+                        "prompt": row["prompt"],
+                        "output": row["output"],
+                        "cached": row["cached"],
+                        "warning": row["note"],
+                    }
+                )
             elif self.path in {"/api/start", "/api/pause"}:
                 book.switch(self.path == "/api/start")
             elif self.path == "/api/bark-test":
@@ -139,6 +162,7 @@ def main():
             (os.getenv("BIND", "127.0.0.1"), int(os.getenv("PORT", "8080"))), Handler
         )
         http.credential = b"Basic " + base64.b64encode(("admin:" + password).encode())
+        http.csrf_token = secrets.token_urlsafe(32)
         http.book = book
         worker = Worker(book)
 

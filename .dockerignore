@@ -3,5 +3,6 @@
 !ledger.py
 !worker.py
 !server.py
+!codex_runner.py
 !static/
 !static/**
