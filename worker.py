@@ -1,0 +1,160 @@
+import email.utils
+import json
+import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPException
+from urllib.error import HTTPError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from metering import endpoint, usage
+
+logger = logging.getLogger(__name__)
+UPSTREAM_ERRORS = (OSError, HTTPException, ValueError, TypeError, RecursionError)
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def post(url, data, headers=None, timeout=120):
+    request = Request(
+        url,
+        data=json.dumps(data).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    with build_opener(NoRedirect).open(request, timeout=timeout) as response:
+        raw = response.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError("接口响应超过大小限制")
+        return json.loads(raw)
+
+
+def retry_after(value):
+    try:
+        return min(max(0, int(value)), 253402300799 - time.time())
+    except (ValueError, TypeError):
+        try:
+            return max(
+                0, email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+            )
+        except (ValueError, TypeError, OverflowError):
+            return 0
+
+
+def complete(book, job):
+    ident, cfg, prompt, out = job
+    try:
+        data = post(
+            endpoint(cfg["base_url"]),
+            {
+                "model": cfg["model"],
+                "messages": [{"role": "user", "content": prompt}],
+                cfg["output_field"]: out,
+                "stream": False,
+            },
+            {"Authorization": "Bearer " + cfg["api_key"]},
+        )
+        counts = usage(data.get("usage") if isinstance(data, dict) else None)
+    except HTTPError as err:
+        code = err.code
+        wait = retry_after(err.headers.get("Retry-After")) if code == 429 else 0
+        err.close()
+        if code == 429:
+            book.failed(ident, "HTTP 429 · 供应商限流，稍后重试", "limited", wait)
+        elif code in {400, 401, 402, 403, 404, 405, 413, 415, 422} or 300 <= code < 400:
+            book.failed(
+                ident,
+                f"HTTP {code} · 请求被拒绝，请检查接口、模型、参数和账户",
+                "rejected",
+            )
+        else:
+            book.failed(ident, f"HTTP {code} · 扣费情况未知，请核对账单")
+        return
+    except UPSTREAM_ERRORS as err:
+        # Provider payloads and exception URLs may contain secrets. Store only a fixed category.
+        note = (
+            "响应缺少有效用量"
+            if isinstance(err, (ValueError, TypeError, RecursionError))
+            else "连接中断或超时"
+        )
+        book.failed(ident, f"{note}，请核对供应商账单")
+        return
+    book.settle(ident, *counts)
+
+
+def deliver(book, notice):
+    row, address = notice
+    # Bark JSON API supports device_key and leaves title/body out of the URL.
+    parts = urlsplit(address)
+    prefix, _, key = parts.path.rstrip("/").rpartition("/")
+    url = urlunsplit((parts.scheme, parts.netloc, prefix + "/push", "", ""))
+    error = ""
+    try:
+        result = post(
+            url,
+            {
+                "device_key": key,
+                "title": row["title"],
+                "body": row["body"],
+                "group": "Token Meter",
+            },
+            timeout=12,
+        )
+        if not isinstance(result, dict) or result.get("code") != 200:
+            error = "Bark 未确认投递，请检查设备 Key"
+    except HTTPError as err:
+        error = f"Bark 返回 HTTP {err.code}"
+        err.close()
+    except UPSTREAM_ERRORS:
+        error = "Bark 连接失败或响应无效"
+    book.notice_result(row, error)
+
+
+class Worker:
+    def __init__(self, book):
+        self.book = book
+        self.stop = threading.Event()
+        self.pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix="provider")
+
+    def run(self):
+        while not self.stop.is_set():
+            job = self.book.reserve()
+            if job:
+                fut = self.pool.submit(complete, self.book, job)
+                fut.add_done_callback(self.check)
+            else:
+                self.stop.wait(0.35)
+
+    @staticmethod
+    def check(future):
+        if future.exception():
+            logger.error(
+                "Unexpected ledger settlement error", exc_info=future.exception()
+            )
+
+    def notify(self):
+        while not self.stop.is_set():
+            notice = self.book.next_notice()
+            if notice:
+                deliver(self.book, notice)
+            else:
+                self.stop.wait(1)
+
+    def start(self):
+        self.threads = [
+            threading.Thread(target=task, daemon=True)
+            for task in (self.run, self.notify)
+        ]
+        for thread in self.threads:
+            thread.start()
+
+    def close(self):
+        self.stop.set()
+        for thread in self.threads:
+            thread.join()
+        self.pool.shutdown(wait=True)

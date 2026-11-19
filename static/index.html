@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#f6f7f4" />
+    <title>用量总览 · Token Meter</title>
+    <link rel="icon" href="/mark.svg" />
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <a href="#page-title" class="skip">跳到主要内容</a>
+    <header class="top">
+      <div class="top-inner">
+        <a class="brand" href="#overview"
+          ><img src="/mark.svg" alt="" width="34" height="34" />Token Meter</a
+        >
+        <nav aria-label="主导航">
+          <a href="#overview" data-nav="overview"
+            ><i data-icon="grid"></i>用量总览</a
+          ><a href="#logs" data-nav="logs"><i data-icon="list"></i>请求记录</a
+          ><a href="#settings" data-nav="settings"
+            ><i data-icon="sliders"></i>运行设置</a
+          >
+        </nav>
+        <div class="online">
+          <span class="dot"></span><span id="online">连接中</span>
+        </div>
+      </div>
+    </header>
+    <main>
+      <div class="page-head">
+        <div>
+          <h1 id="page-title" tabindex="-1">用量总览</h1>
+          <div class="subline">
+            <i data-icon="calendar"></i><span id="period">正在读取周期</span
+            ><span class="divider"></span><span id="tz"></span>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="exec-btn" class="primary" hidden></button
+          ><button id="save-btn" class="primary" form="settings-form" hidden>
+            <i data-icon="check"></i>保存设置
+          </button>
+        </div>
+      </div>
+      <div id="message" class="banner" role="status" hidden></div>
+      <section id="overview" hidden aria-label="用量总览">
+        <div class="upper-grid">
+          <section class="card budget">
+            <div class="card-head">
+              <h2><i data-icon="wallet"></i>本周预算</h2>
+              <span id="plan-badge" class="dark-badge"></span>
+            </div>
+            <div class="budget-body">
+              <div>
+                <div class="metric-label" id="spend-label">已结算金额</div>
+                <div class="amount" id="spend">—</div>
+                <div class="goal-line">目标 <strong id="goal">—</strong></div>
+              </div>
+              <div class="gauge" role="img" id="gauge">
+                <svg viewBox="0 0 148 148" aria-hidden="true">
+                  <circle class="ticks" cx="74" cy="74" r="67" />
+                  <circle class="track" cx="74" cy="74" r="55" />
+                  <circle
+                    class="arc"
+                    id="arc"
+                    cx="74"
+                    cy="74"
+                    r="55"
+                    pathLength="100"
+                  />
+                </svg>
+                <div><b id="gauge-value">0%</b><span>已完成</span></div>
+              </div>
+            </div>
+            <div class="budget-foot">
+              <span>在途及待核对 <b id="held">—</b></span
+              ><span>预算上限 <b id="cap">—</b></span>
+            </div>
+          </section>
+          <section class="card chart-card">
+            <div class="card-head">
+              <h2><i data-icon="chart"></i>每日用量</h2>
+              <span class="unit" id="chart-unit"></span>
+            </div>
+            <div class="chart">
+              <div class="axis" aria-hidden="true">
+                <span id="axis-max">1</span><span id="axis-mid">0.5</span
+                ><span>0</span>
+              </div>
+              <div class="plot">
+                <span id="empty-chart">等待首笔用量</span>
+                <div class="bars" id="bars"></div>
+              </div>
+            </div>
+            <div class="chart-foot">
+              <span class="legend"></span><span id="chart-legend">每日结算</span
+              ><span class="chart-period">本周</span>
+            </div>
+          </section>
+        </div>
+        <div class="metrics">
+          <section class="card metric">
+            <div class="metric-head">
+              <span class="icon-tile"><i data-icon="layers"></i></span>
+              <h2>Token 总量</h2>
+            </div>
+            <b class="value" id="token-total">—</b>
+            <p id="token-split"></p>
+          </section>
+          <section class="card metric">
+            <div class="metric-head">
+              <span class="icon-tile blue"><i data-icon="cache"></i></span>
+              <h2>缓存命中率</h2>
+            </div>
+            <b class="value" id="cache-rate">—</b>
+            <p id="cache-detail"></p>
+          </section>
+          <section class="card metric">
+            <div class="metric-head">
+              <span class="icon-tile amber"><i data-icon="activity"></i></span>
+              <h2>并发请求</h2>
+            </div>
+            <b class="value" id="active-total">—</b>
+            <p id="call-detail"></p>
+          </section>
+        </div>
+        <div class="lower-grid">
+          <section class="card log-card">
+            <div class="card-head">
+              <h2><i data-icon="list"></i>最近请求</h2>
+              <a href="#logs" class="text-link"
+                >全部记录 <i data-icon="arrow"></i
+              ></a>
+            </div>
+            <div id="recent-table"></div>
+          </section>
+          <section class="card plan-card">
+            <div class="card-head">
+              <h2><i data-icon="sliders"></i>执行配置</h2>
+              <a href="#settings" class="icon-link" aria-label="编辑执行配置"
+                ><i data-icon="edit"></i
+              ></a>
+            </div>
+            <dl>
+              <div>
+                <dt>接口模型</dt>
+                <dd id="plan-model">—</dd>
+              </div>
+              <div>
+                <dt>预算模式</dt>
+                <dd id="plan-mode">—</dd>
+              </div>
+              <div>
+                <dt>下次重置</dt>
+                <dd id="plan-reset">—</dd>
+              </div>
+              <div>
+                <dt>Bark 通知</dt>
+                <dd id="plan-bark">—</dd>
+              </div>
+            </dl>
+          </section>
+        </div>
+      </section>
+      <section id="logs" hidden aria-label="请求记录">
+        <div class="card log-card">
+          <div class="card-head">
+            <h2><i data-icon="list"></i>请求明细</h2>
+            <label class="filter"
+              ><input id="only-unknown" type="checkbox" />仅待核对</label
+            >
+          </div>
+          <div id="full-table"></div>
+          <button id="more-logs" class="secondary more" hidden>
+            加载更早记录
+          </button>
+        </div>
+      </section>
+      <section id="settings" hidden aria-label="运行设置">
+        <form id="settings-form">
+          <div class="settings-grid">
+            <section class="card form-card">
+              <h2><i data-icon="plug"></i>模型接口</h2>
+              <div class="fields">
+                <label class="wide"
+                  >接口地址<input
+                    name="base_url"
+                    type="url"
+                    required
+                    placeholder="https://api.openai.com/v1"
+                    autocomplete="off"
+                /></label>
+                <label class="wide"
+                  >API Key<input
+                    name="api_key"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="输入提供商的 API Key"
+                /></label>
+                <label class="wide"
+                  >模型名称<input
+                    name="model"
+                    required
+                    placeholder="使用供应商提供的模型 ID"
+                    maxlength="256"
+                /></label>
+                <label
+                  >输出上限参数<select name="output_field">
+                    <option>max_tokens</option>
+                    <option>max_completion_tokens</option>
+                  </select></label
+                >
+                <label
+                  >单次最大输出 token<input
+                    name="max_output"
+                    type="number"
+                    min="1"
+                    max="32768"
+                    required
+                /></label>
+              </div>
+            </section>
+            <section class="card form-card">
+              <h2><i data-icon="wallet"></i>每周执行计划</h2>
+              <div class="fields">
+                <label class="wide"
+                  >预算模式<select name="mode">
+                    <option value="usd">按美元金额</option>
+                    <option value="tokens">按 token 总量</option>
+                  </select></label
+                >
+                <label data-mode="usd"
+                  >每周目标（USD）<input
+                    name="usd_target"
+                    type="number"
+                    min=".01"
+                    max="100000"
+                    step=".01"
+                    required
+                /></label>
+                <label data-mode="usd"
+                  >最高支出（USD）<input
+                    name="usd_limit"
+                    type="number"
+                    min=".01"
+                    max="100000"
+                    step=".01"
+                    required
+                /></label>
+                <label data-mode="tokens"
+                  >每周目标（token）<input
+                    name="token_target"
+                    type="number"
+                    min="1"
+                    max="1000000000000"
+                    required
+                /></label>
+                <label data-mode="tokens"
+                  >用量上限（token）<input
+                    name="token_limit"
+                    type="number"
+                    min="1"
+                    max="1000000000000"
+                    required
+                /></label>
+                <label class="wide"
+                  >并发请求数<input
+                    name="concurrency"
+                    type="number"
+                    min="1"
+                    max="32"
+                    required
+                /></label>
+                <p class="hint wide" id="plan-hint"></p>
+              </div>
+            </section>
+            <section class="card form-card">
+              <h2><i data-icon="chart"></i>模型计价</h2>
+              <p class="help">
+                按供应商账单填写每百万 token 的美元单价，用于估算本周支出。
+              </p>
+              <div class="fields">
+                <label
+                  >普通输入<input
+                    name="input_price"
+                    type="number"
+                    min="0"
+                    max="10000"
+                    step=".000001"
+                    placeholder="USD / 1M"
+                    required /></label
+                ><label
+                  >缓存输入<input
+                    name="cached_price"
+                    type="number"
+                    min="0"
+                    max="10000"
+                    step=".000001"
+                    placeholder="USD / 1M"
+                    required /></label
+                ><label
+                  >输出<input
+                    name="output_price"
+                    type="number"
+                    min="0"
+                    max="10000"
+                    step=".000001"
+                    placeholder="USD / 1M"
+                    required
+                /></label>
+              </div>
+            </section>
+            <section class="card form-card">
+              <h2><i data-icon="bell"></i>Bark 通知</h2>
+              <p class="help">达到本周目标或接口请求出错时，推送到你的设备。</p>
+              <div class="fields">
+                <label class="wide"
+                  >Bark 推送地址<input
+                    name="bark_url"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="https://api.day.app/设备Key"
+                /></label>
+                <label class="check-row wide" id="remove-bark-label" hidden
+                  ><input
+                    name="remove_bark"
+                    type="checkbox"
+                  />移除已保存的推送地址</label
+                >
+              </div>
+              <div class="bark-actions">
+                <button id="test-bark" class="secondary" type="button">
+                  测试已保存地址</button
+                ><small id="delivery"></small>
+              </div>
+            </section>
+          </div>
+        </form>
+      </section>
+    </main>
+    <dialog id="resolve-dialog" aria-labelledby="resolve-title">
+      <form id="resolve-form">
+        <h2 id="resolve-title">核对请求用量</h2>
+        <p class="help">按供应商账单录入。确认未扣费时，三项均填 0。</p>
+        <div class="fields">
+          <label class="wide"
+            >输入 token<input
+              type="number"
+              name="prompt"
+              min="0"
+              max="100000000"
+              required /></label
+          ><label
+            >其中缓存 token<input
+              type="number"
+              name="cached"
+              min="0"
+              required /></label
+          ><label
+            >输出 token<input
+              type="number"
+              name="output"
+              min="0"
+              max="100000000"
+              required
+          /></label>
+        </div>
+        <p class="error" id="resolve-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-resolve" class="secondary">
+            取消</button
+          ><button class="primary">确认结算</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

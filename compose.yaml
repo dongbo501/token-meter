@@ -1,0 +1,18 @@
+name: token-meter
+services:
+  panel:
+    image: ghcr.io/dongbo501/token-meter:latest
+    build: .
+    pull_policy: missing
+    ports:
+      - "127.0.0.1:${PANEL_PORT:-8080}:8080"
+    environment:
+      BILLING_TZ: ${BILLING_TZ:-Asia/Shanghai}
+      WEEK_START: ${WEEK_START:-0}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - meter-data:/data
+    restart: unless-stopped
+    stop_grace_period: 150s
+volumes:
+  meter-data:
