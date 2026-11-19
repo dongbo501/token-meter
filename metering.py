@@ -13,6 +13,7 @@ DEFAULTS = {
     "model": "",
     "api_key": "",
     "api_style": "codex",
+    "reasoning_effort": "default",
     "bark_url": "",
     "mode": "usd",
     "usd_target": 600,
@@ -71,7 +72,15 @@ def endpoint(base, style="chat"):
 
 def configure(old, raw):
     c = dict(old)
-    for k in ("base_url", "model", "api_key", "mode", "output_field", "api_style"):
+    for k in (
+        "base_url",
+        "model",
+        "api_key",
+        "mode",
+        "output_field",
+        "api_style",
+        "reasoning_effort",
+    ):
         value = raw.get(k, "")
         if not isinstance(value, str):
             raise TypeError("设置值须为文本")
@@ -121,6 +130,17 @@ def configure(old, raw):
         raise ValueError("预算模式或输出参数无效")
     if c.get("api_style") not in {"chat", "responses", "codex"}:
         raise ValueError("执行方式无效")
+    if c.get("reasoning_effort") not in {
+        "default",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }:
+        raise ValueError("推理强度无效，请选择模型默认或列表中的强度")
     limits = {
         "usd_target": ("美元目标", 0.01, 100000, 2),
         "usd_limit": ("美元上限", 0.01, 100000, 2),

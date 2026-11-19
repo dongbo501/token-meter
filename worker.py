@@ -68,6 +68,12 @@ def complete(book, job):
                     "store": False,
                     "stream": False,
                 }
+            effort = cfg["reasoning_effort"]
+            if effort != "default":
+                if cfg["api_style"] == "responses":
+                    payload["reasoning"] = {"effort": effort}
+                else:
+                    payload["reasoning_effort"] = effort
             data = post(
                 endpoint(cfg["base_url"], cfg["api_style"]),
                 payload,

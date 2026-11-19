@@ -220,12 +220,13 @@ def run_codex(book, job):
             "model_providers.meter.stream_max_retries": 0,
             "model_providers.meter.stream_idle_timeout_ms": 130000,
             "model_instructions_file": str(instructions),
-            "model_reasoning_effort": "low",
             "features.shell_tool": False,
             "features.multi_agent": False,
             "web_search": "disabled",
             "history.persistence": "none",
         }
+        if cfg["reasoning_effort"] != "default":
+            config["model_reasoning_effort"] = cfg["reasoning_effort"]
         args = [
             binary,
             "exec",

@@ -85,6 +85,13 @@ class MemoryStorageTest(unittest.TestCase):
         self.book = self.open()
         self.assertEqual(self.book.snapshot()["totals"]["count"], 3)
 
+    def test_reasoning_setting_is_saved_immediately_in_memory_mode(self):
+        self.book.switch(False)
+        self.book.save({"reasoning_effort": "xhigh"})
+        self.book.db.close()
+        self.book = self.open()
+        self.assertEqual(self.book.snapshot()["config"]["reasoning_effort"], "xhigh")
+
     def test_crash_only_recovers_last_checkpoint_and_estimates_saved_active(self):
         self.settle(2)
         active = self.book.reserve()

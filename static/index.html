@@ -256,6 +256,26 @@
                     max="32768"
                     required
                 /></label>
+                <label class="wide" for="reasoning-effort"
+                  >推理强度<select
+                    id="reasoning-effort"
+                    name="reasoning_effort"
+                    aria-describedby="reasoning-help"
+                  >
+                    <option value="default">模型默认</option>
+                    <option value="none">关闭（none）</option>
+                    <option value="minimal">最低（minimal）</option>
+                    <option value="low">低（low）</option>
+                    <option value="medium">中（medium）</option>
+                    <option value="high">高（high）</option>
+                    <option value="xhigh">超高（xhigh）</option>
+                    <option value="max">最高（max）</option>
+                  </select></label
+                >
+                <p class="hint wide" id="reasoning-help">
+                  可用档位取决于模型和供应商；不确定时选择“模型默认”。推理
+                  token 计入输出上限，提高强度可能增加用量和等待时间。
+                </p>
               </div>
               <div class="bark-actions">
                 <button id="test-provider" class="secondary" type="button">

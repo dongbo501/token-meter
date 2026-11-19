@@ -121,8 +121,16 @@ class Ledger:
             )
             # Preserve the protocol of existing deployments during schema migration.
             saved = json.loads(self._state()["config"])
+            migrated = False
             if "api_style" not in saved:
                 saved["api_style"] = "chat"
+                migrated = True
+            if "reasoning_effort" not in saved:
+                saved["reasoning_effort"] = (
+                    "low" if saved["api_style"] == "codex" else "default"
+                )
+                migrated = True
+            if migrated:
                 self.db.execute(
                     "UPDATE state SET config=? WHERE id=1", (json.dumps(saved),)
                 )

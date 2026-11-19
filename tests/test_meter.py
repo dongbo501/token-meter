@@ -380,6 +380,64 @@ class MeterTest(unittest.TestCase):
             "https://example.com/v1/responses",
         )
 
+    def test_api_reasoning_effort_and_default_payloads(self):
+        for style in ("chat", "responses"):
+            for effort in (
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "default"
+            ):
+                with self.subTest(style=style, effort=effort):
+                    self.start(api_style=style, reasoning_effort=effort)
+                    complete(self.book, self.book.reserve())
+                    body = self.server.calls[-1][1]
+                    if effort == "default":
+                        self.assertNotIn("reasoning", body)
+                        self.assertNotIn("reasoning_effort", body)
+                    elif style == "responses":
+                        self.assertEqual(body["reasoning"], {"effort": effort})
+                        self.assertNotIn("reasoning_effort", body)
+                    else:
+                        self.assertEqual(body["reasoning_effort"], effort)
+                        self.assertNotIn("reasoning", body)
+                    self.assertEqual(self.book.logs()["rows"][0]["status"], "done")
+                    self.book.switch(False)
+
+    def test_reasoning_setting_validation_persistence_and_reset(self):
+        self.book.save({"reasoning_effort": "high"})
+        for value in ("invalid", "HIGH", 1, None, [], {}):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                self.book.save({"reasoning_effort": value})
+        self.book.save({"concurrency": 2})
+        self.book.db.close()
+        self.book = self.open()
+        self.assertEqual(self.book.snapshot()["config"]["reasoning_effort"], "high")
+        self.book.save({"reasoning_effort": "default"})
+        self.book.db.close()
+        self.book = self.open()
+        self.assertEqual(self.book.snapshot()["config"]["reasoning_effort"], "default")
+
+    def test_reasoning_migration_preserves_existing_protocol_defaults(self):
+        for style in ("chat", "responses", "codex"):
+            with self.subTest(style=style):
+                cfg = json.loads(self.book._state()["config"])
+                cfg["api_style"] = style
+                cfg.pop("reasoning_effort")
+                with self.book.db:
+                    self.book.db.execute("UPDATE state SET config=?", (json.dumps(cfg),))
+                self.book.db.close()
+                self.book = self.open()
+                expected = "low" if style == "codex" else "default"
+                self.assertEqual(
+                    self.book.snapshot()["config"]["reasoning_effort"], expected
+                )
+
+    def test_probe_uses_saved_reasoning_and_keeps_small_output_cap(self):
+        self.book.save({"api_style": "responses", "reasoning_effort": "high"})
+        complete(self.book, self.book.reserve(probe=True))
+        body = self.server.calls[-1][1]
+        self.assertEqual(body["reasoning"], {"effort": "high"})
+        self.assertEqual(body["max_output_tokens"], 32)
+        self.assertFalse(self.book.snapshot()["enabled"])
+
     def test_probe_is_billed_once_without_enabling_schedule(self):
         job = self.book.reserve(probe=True)
         self.assertEqual(job[3], 32)
@@ -525,7 +583,7 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(state["totals"]["output"], 146)
         self.assertIn("输出上限", state["note"])
 
-    def cli_fixture(self, input_size=4000):
+    def cli_fixture(self, input_size=4000, effort="default"):
         test = self
 
         class FakeCLI:
@@ -535,6 +593,13 @@ class MeterTest(unittest.TestCase):
                 test.assertEqual(Path(env["TMPDIR"]), Path(env["CODEX_HOME"]).parent)
                 test.assertTrue(Path(env["TMPDIR"]).is_dir())
                 test.assertIn('history.persistence="none"', args)
+                effort_args = [a for a in args if a.startswith("model_reasoning_effort=")]
+                test.assertEqual(
+                    effort_args,
+                    []
+                    if effort == "default"
+                    else [f"model_reasoning_effort={json.dumps(effort)}"],
+                )
                 value = next(
                     a for a in args if a.startswith("model_providers.meter.base_url=")
                 )
@@ -546,6 +611,7 @@ class MeterTest(unittest.TestCase):
                     "instructions": "x" * input_size,
                     "input": "Return Python code",
                     "tools": [{"type": "function"}],
+                    "reasoning": {"effort": "medium" if effort == "default" else effort},
                 }
                 headers = {
                     "Authorization": "Bearer " + self.env["METER_RELAY_KEY"],
@@ -595,15 +661,38 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(self.book.snapshot()["held_tokens"], 0)
         self.assertFalse(self.book.snapshot()["enabled"])
 
+    def test_cli_reasoning_options_reach_provider(self):
+        for effort in (
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "default"
+        ):
+            with self.subTest(effort=effort):
+                self.start(api_style="codex", reasoning_effort=effort)
+                with (
+                    patch("codex_runner.shutil.which", return_value="/fake/codex"),
+                    self.cli_fixture(effort=effort),
+                ):
+                    complete(self.book, self.book.reserve())
+                body = self.server.calls[-1][1]
+                expected = "medium" if effort == "default" else effort
+                self.assertEqual(body["reasoning"], {"effort": expected})
+                self.assertEqual(body["max_output_tokens"], 2048)
+                self.assertEqual(self.book.logs()["rows"][0]["status"], "done")
+                self.book.switch(False)
+
     @unittest.skipUnless(
         shutil.which("codex"), "official CLI is tested in the container build"
     )
     def test_real_cli_with_local_provider(self):
         self.start(
-            api_style="codex", mode="tokens", token_target=100000, token_limit=120000
+            api_style="codex",
+            mode="tokens",
+            token_target=100000,
+            token_limit=120000,
+            reasoning_effort="high",
         )
         complete(self.book, self.book.reserve(probe=False))
         self.assertEqual(len(self.server.calls), 1)
+        self.assertEqual(self.server.calls[0][1]["reasoning"]["effort"], "high")
         self.assertEqual(self.book.snapshot()["totals"]["count"], 1)
 
     def test_streamed_response_usage_and_missing_final_event(self):
