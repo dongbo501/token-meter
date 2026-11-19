@@ -1,4 +1,3 @@
-import email.utils
 import json
 import logging
 import sqlite3
@@ -11,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from codex_runner import LocalReject, run_codex
+from http_client import read_chunks, remaining
 from metering import endpoint, usage
 
 logger = logging.getLogger(__name__)
@@ -22,30 +22,17 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def post(url, data, headers=None, timeout=120):
+def post(url, data, headers=None, timeout=600):
+    deadline = time.monotonic() + timeout
     request = Request(
         url,
         data=json.dumps(data).encode(),
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
-    with build_opener(NoRedirect).open(request, timeout=timeout) as response:
-        raw = response.read(4 * 1024 * 1024 + 1)
-        if len(raw) > 4 * 1024 * 1024:
-            raise ValueError("接口响应超过大小限制")
+    with build_opener(NoRedirect).open(request, timeout=remaining(deadline)) as response:
+        raw = b"".join(read_chunks(response, deadline))
         return json.loads(raw)
-
-
-def retry_after(value):
-    try:
-        return min(max(0, int(value)), 253402300799 - time.time())
-    except (ValueError, TypeError):
-        try:
-            return max(
-                0, email.utils.parsedate_to_datetime(value).timestamp() - time.time()
-            )
-        except (ValueError, TypeError, OverflowError):
-            return 0
 
 
 def complete(book, job):
@@ -78,6 +65,7 @@ def complete(book, job):
                 endpoint(cfg["base_url"], cfg["api_style"]),
                 payload,
                 {"Authorization": "Bearer " + cfg["api_key"]},
+                timeout=cfg["request_timeout"],
             )
             counts = usage(data.get("usage") if isinstance(data, dict) else None)
     except LocalReject as err:
@@ -85,10 +73,9 @@ def complete(book, job):
         return
     except HTTPError as err:
         code = err.code
-        wait = retry_after(err.headers.get("Retry-After")) if code == 429 else 0
         err.close()
         if code == 429:
-            book.failed(ident, "HTTP 429 · 供应商限流，稍后重试", "limited", wait)
+            book.failed(ident, "HTTP 429 · 供应商限流，5 秒后重试", "limited")
         elif code in {400, 401, 402, 403, 404, 405, 413, 415, 422} or 300 <= code < 400:
             book.failed(
                 ident,
@@ -103,7 +90,7 @@ def complete(book, job):
         note = (
             "响应缺少有效用量"
             if isinstance(err, (ValueError, TypeError, RecursionError))
-            else "连接中断或超时"
+            else f"连接中断或超时（请求上限 {cfg['request_timeout']} 秒）"
         )
         book.failed(ident, note)
         return

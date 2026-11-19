@@ -2,6 +2,7 @@ import json
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -12,10 +13,10 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from codex_runner import stream_usage
+from codex_runner import read_response, stream_usage
 from ledger import Ledger
 from metering import endpoint, usage
-from worker import complete, deliver, retry_after
+from worker import complete, deliver, post
 
 
 class Gateway(BaseHTTPRequestHandler):
@@ -166,6 +167,30 @@ class MeterTest(unittest.TestCase):
         self.server.reply = 200, {"code": 200}
         deliver(self.book, self.book.next_notice())
         self.assertEqual(self.book.snapshot()["pending_notices"], 0)
+        self.assertIsNotNone(self.book.reserve())
+
+    def test_repeated_failures_always_wait_five_seconds(self):
+        self.start()
+        for code in (429, 503, 429, 503, 503, 429):
+            with self.subTest(code=code):
+                self.server.reply = code, {}
+                complete(self.book, self.book.reserve())
+                self.assertEqual(self.book._state()["retry"], self.now.timestamp() + 5)
+                self.now += timedelta(seconds=4)
+                self.assertIsNone(self.book.reserve())
+                self.now += timedelta(seconds=1)
+
+    def test_upgrade_shortens_existing_long_backoff(self):
+        self.start()
+        with self.book.db:
+            self.book.db.execute(
+                "UPDATE state SET retry=?,failures=6", (self.now.timestamp() + 300,)
+            )
+        self.book.db.close()
+        self.book = self.open()
+        self.assertEqual(self.book._state()["retry"], self.now.timestamp() + 5)
+        self.assertIsNone(self.book.reserve())
+        self.now += timedelta(seconds=5)
         self.assertIsNotNone(self.book.reserve())
 
     def test_missing_usage_uses_last_success_and_continues_silently(self):
@@ -350,7 +375,6 @@ class MeterTest(unittest.TestCase):
             self.book.save({"base_url": "https://example.net/v1"})
         with self.assertRaises(ValueError):
             self.book.save({"concurrency": 2.5})
-        self.assertEqual(retry_after(None), 0)
 
     def test_responses_usage_and_endpoint(self):
         self.start(api_style="responses")
@@ -437,6 +461,39 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(body["reasoning"], {"effort": "high"})
         self.assertEqual(body["max_output_tokens"], 32)
         self.assertFalse(self.book.snapshot()["enabled"])
+
+    def test_request_timeout_validation_migration_and_persistence(self):
+        self.assertEqual(self.book.snapshot()["config"]["request_timeout"], 600)
+        for value in (29, 3601, 30.5, True, None, "nan", "inf", [], {}):
+            with self.subTest(value=value), self.assertRaises((ValueError, TypeError)):
+                self.book.save({"request_timeout": value})
+        for value in (30, 3600, "900"):
+            self.book.save({"request_timeout": value})
+            self.book.db.close()
+            self.book = self.open()
+            self.assertEqual(
+                self.book.snapshot()["config"]["request_timeout"], int(value)
+            )
+        cfg = json.loads(self.book._state()["config"])
+        cfg.pop("request_timeout")
+        with self.book.db:
+            self.book.db.execute("UPDATE state SET config=?", (json.dumps(cfg),))
+        self.book.db.close()
+        self.book = self.open()
+        self.assertEqual(self.book.snapshot()["config"]["request_timeout"], 600)
+
+    def test_api_and_probe_use_saved_timeout(self):
+        for style in ("chat", "responses"):
+            for probe in (False, True):
+                with self.subTest(style=style, probe=probe):
+                    self.book.save({"api_style": style, "request_timeout": 900})
+                    if not probe:
+                        self.book.switch(True)
+                    with patch("worker.post", wraps=post) as request:
+                        complete(self.book, self.book.reserve(probe=probe))
+                    self.assertEqual(request.call_args.kwargs["timeout"], 900)
+                    self.assertEqual(self.book.logs()["rows"][0]["status"], "done")
+                    self.book.switch(False)
 
     def test_probe_is_billed_once_without_enabling_schedule(self):
         job = self.book.reserve(probe=True)
@@ -583,7 +640,7 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(state["totals"]["output"], 146)
         self.assertIn("输出上限", state["note"])
 
-    def cli_fixture(self, input_size=4000, effort="default"):
+    def cli_fixture(self, input_size=4000, effort="default", request_timeout=600):
         test = self
 
         class FakeCLI:
@@ -593,6 +650,10 @@ class MeterTest(unittest.TestCase):
                 test.assertEqual(Path(env["TMPDIR"]), Path(env["CODEX_HOME"]).parent)
                 test.assertTrue(Path(env["TMPDIR"]).is_dir())
                 test.assertIn('history.persistence="none"', args)
+                test.assertIn(
+                    f"model_providers.meter.stream_idle_timeout_ms={(request_timeout + 10) * 1000}",
+                    args,
+                )
                 effort_args = [a for a in args if a.startswith("model_reasoning_effort=")]
                 test.assertEqual(
                     effort_args,
@@ -606,6 +667,8 @@ class MeterTest(unittest.TestCase):
                 self.url = json.loads(value.split("=", 1)[1]) + "/responses"
 
             def communicate(self, _prompt, timeout):
+                test.assertGreater(timeout, request_timeout)
+                test.assertLessEqual(timeout, request_timeout + 20)
                 body = {
                     "model": "mock",
                     "instructions": "x" * input_size,
@@ -678,6 +741,20 @@ class MeterTest(unittest.TestCase):
                 self.assertEqual(body["max_output_tokens"], 2048)
                 self.assertEqual(self.book.logs()["rows"][0]["status"], "done")
                 self.book.switch(False)
+
+    def test_cli_custom_timeout_reaches_relay_and_process(self):
+        self.start(api_style="codex", request_timeout=900)
+        with (
+            patch("codex_runner.shutil.which", return_value="/fake/codex"),
+            self.cli_fixture(request_timeout=900),
+            patch("codex_runner.read_response", wraps=read_response) as read,
+        ):
+            started = time.monotonic()
+            complete(self.book, self.book.reserve())
+            deadline = read.call_args.args[2]
+            self.assertGreaterEqual(deadline, started + 900)
+            self.assertLessEqual(deadline, time.monotonic() + 900)
+        self.assertEqual(self.book.logs()["rows"][0]["status"], "done")
 
     @unittest.skipUnless(
         shutil.which("codex"), "official CLI is tested in the container build"

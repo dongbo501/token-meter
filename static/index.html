@@ -276,6 +276,21 @@
                   可用档位取决于模型和供应商；不确定时选择“模型默认”。推理
                   token 计入输出上限，提高强度可能增加用量和等待时间。
                 </p>
+                <label class="wide" for="request-timeout"
+                  >单次请求超时（秒，必填）<input
+                    id="request-timeout"
+                    name="request_timeout"
+                    type="number"
+                    min="30"
+                    max="3600"
+                    step="1"
+                    required
+                    aria-describedby="timeout-help"
+                /></label>
+                <p class="hint wide" id="timeout-help">
+                  可设为 30～3600 秒，默认 600 秒（10 分钟）。三种执行方式共用；
+                  首字返回和持续输出不会重置计时。超时、断流、限流后固定等待 5 秒再试。
+                </p>
               </div>
               <div class="bark-actions">
                 <button id="test-provider" class="secondary" type="button">

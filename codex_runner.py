@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from http_client import read_chunks, remaining
 from metering import endpoint, usage
 
 MAX_RESPONSE = 4 * 1024 * 1024
@@ -54,28 +55,13 @@ def stream_usage(raw, content_type):
     raise ValueError("流式响应未报告最终用量")
 
 
-def read_response(response, content_type):
+def read_response(response, content_type, deadline):
     """Stop at the terminal SSE event; some gateways keep the HTTP stream open."""
-    if "text/event-stream" not in content_type:
-        raw = response.read(MAX_RESPONSE + 1)
-        if len(raw) > MAX_RESPONSE:
-            raise ValueError("响应过大")
-        return raw
-    deadline = time.monotonic() + 120
-    chunks, pending, size = [], b"", 0
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("流式请求超过时限")
-        # HTTPResponse does not expose a public socket-timeout setter.
-        response.fp.raw._sock.settimeout(remaining)
-        chunk = response.read1(65536)
-        if not chunk:
-            return b"".join(chunks)
-        size += len(chunk)
-        if size > MAX_RESPONSE:
-            raise ValueError("响应过大")
+    chunks, pending = [], b""
+    for chunk in read_chunks(response, deadline, MAX_RESPONSE):
         chunks.append(chunk)
+        if "text/event-stream" not in content_type:
+            continue
         pending += chunk
         normalized = pending.replace(b"\r\n", b"\n")
         blocks = normalized.split(b"\n\n")
@@ -96,10 +82,13 @@ def read_response(response, content_type):
         # Keep raw trailing bytes so a CRLF split across reads stays intact.
         if len(blocks) > 1:
             pending = blocks[-1]
+    return b"".join(chunks)
 
 
 def run_codex(book, job):
     ident, cfg, prompt, _ = job
+    timeout = cfg["request_timeout"]
+    deadline = time.monotonic() + timeout
     binary = shutil.which("codex")
     if not binary:
         raise LocalReject("未安装官方 Codex CLI，请使用发布的容器镜像")
@@ -175,12 +164,16 @@ def run_codex(book, job):
                     headers=headers,
                     method="POST",
                 )
+                try:
+                    wait = remaining(deadline)
+                except TimeoutError:
+                    raise LocalReject("Codex CLI 启动超时，未发送到供应商") from None
                 result["sent"] = True
-                with build_opener(NoRedirect).open(req, timeout=120) as response:
+                with build_opener(NoRedirect).open(req, timeout=wait) as response:
                     content_type = response.headers.get(
                         "Content-Type", "application/json"
                     )
-                    raw = read_response(response, content_type)
+                    raw = read_response(response, content_type, deadline)
                     result["counts"] = stream_usage(raw, content_type)
                 self.reply(200, raw, content_type)
             except (
@@ -218,7 +211,7 @@ def run_codex(book, job):
             "model_providers.meter.wire_api": "responses",
             "model_providers.meter.request_max_retries": 0,
             "model_providers.meter.stream_max_retries": 0,
-            "model_providers.meter.stream_idle_timeout_ms": 130000,
+            "model_providers.meter.stream_idle_timeout_ms": (timeout + 10) * 1000,
             "model_instructions_file": str(instructions),
             "features.shell_tool": False,
             "features.multi_agent": False,
@@ -267,8 +260,15 @@ def run_codex(book, job):
                 start_new_session=True,
             )
             try:
-                proc.communicate(prompt.encode(), timeout=140)
+                # Allow the relay to return the timeout result before killing CLI.
+                proc.communicate(prompt.encode(), timeout=remaining(deadline + 20))
             except subprocess.TimeoutExpired:
+                result.setdefault(
+                    "error",
+                    TimeoutError("Codex 请求超过设置的时限")
+                    if result.get("sent")
+                    else LocalReject("Codex CLI 启动超时，未发送到供应商"),
+                )
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.communicate()
         finally:

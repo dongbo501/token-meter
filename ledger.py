@@ -130,6 +130,9 @@ class Ledger:
                     "low" if saved["api_style"] == "codex" else "default"
                 )
                 migrated = True
+            if "request_timeout" not in saved:
+                saved["request_timeout"] = DEFAULTS["request_timeout"]
+                migrated = True
             if migrated:
                 self.db.execute(
                     "UPDATE state SET config=? WHERE id=1", (json.dumps(saved),)
@@ -154,6 +157,11 @@ class Ledger:
                     self.db.execute(
                         "UPDATE state SET reason='历史待核对记录已自动估算，可启动计划'"
                     )
+            # Upgrade an existing longer backoff to the fixed five-second wait.
+            retry_limit = self.clock() + 5
+            self.db.execute(
+                "UPDATE state SET retry=? WHERE retry>?", (retry_limit, retry_limit)
+            )
         if self.memory:
             # No per-request fsync or filesystem I/O. The on-disk checkpoint
             # remains a regular, atomic SQLite database for restart recovery.
@@ -530,12 +538,10 @@ class Ledger:
             (f"error/{row['id']}",),
         )
 
-    def _backoff(self, delay=0):
-        s = self._state()
-        seconds = max(delay, min(300, 5 * 2 ** min(s["failures"], 6)))
+    def _backoff(self):
         self.db.execute(
-            "UPDATE state SET retry=max(retry,?), failures=failures+1",
-            (self.clock() + seconds,),
+            "UPDATE state SET retry=?, failures=failures+1",
+            (self.clock() + 5,),
         )
 
     def settle(self, ident, prompt, cached, output):
@@ -575,14 +581,14 @@ class Ledger:
                     "UPDATE state SET failures=0 WHERE retry<=?", (self.clock(),)
                 )
 
-    def failed(self, ident, note, kind="unknown", delay=0):
+    def failed(self, ident, note, kind="unknown"):
         with self.lock, self.db:
             row = self.db.execute("SELECT * FROM calls WHERE id=?", (ident,)).fetchone()
             if not row or row["status"] != "active":
                 return
             if kind == "unknown":
                 self._estimate(row, note)
-                self._backoff(delay)
+                self._backoff()
                 return
             changed = self.db.execute(
                 "UPDATE calls SET status=?,note=? WHERE id=? AND status='active'",
@@ -592,7 +598,7 @@ class Ledger:
                 return
             self._notice(f"error/{ident}", "接口请求出错", f"请求 #{ident} · {note}")
             if kind == "limited":
-                self._backoff(delay)
+                self._backoff()
             else:
                 self._pause(note)
 

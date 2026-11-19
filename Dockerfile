@@ -11,7 +11,7 @@ RUN apk add --no-cache tzdata nodejs npm libstdc++ \
  && mkdir -p /data \
  && chown meter:meter /data
 WORKDIR /app
-COPY metering.py ledger.py worker.py server.py auth.py codex_runner.py ./
+COPY metering.py ledger.py worker.py server.py auth.py codex_runner.py http_client.py ./
 COPY static/ ./static/
 ENV BIND=0.0.0.0 PORT=8080 DATA_DIR=/data PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER meter

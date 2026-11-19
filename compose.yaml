@@ -18,7 +18,7 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     restart: unless-stopped
-    stop_grace_period: 150s
+    stop_grace_period: 3630s
     logging:
       driver: json-file
       options:
