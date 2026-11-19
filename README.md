@@ -11,18 +11,18 @@ docker compose up -d
 docker compose exec panel cat /data/admin-password
 ```
 
-Compose 会优先使用本机已有的发行镜像。首次部署时，如果 GHCR 私有镜像拉取失败，Compose 会从公开的 GitHub 仓库获取同一版本的 Dockerfile 和源码并构建，需要构建器可以访问 GitHub、Docker Hub 和 Alpine 软件源。部署目录只需一个 Compose 文件。
+Compose 从 GHCR 匿名拉取公开镜像 `ghcr.io/dongbo501/token-meter:latest`，Docker 会按主机架构选择 AMD64 或 ARM64。部署目录只需一个 Compose 文件。
 
-希望跳过构建时，可从 [GitHub Releases](https://github.com/dongbo501/token-meter/releases/tag/image-8c2839f) 下载对应架构的镜像包，在部署主机按发布页的 `docker load` 命令导入，再执行 `docker compose up -d --no-build --pull never`。
+离线部署时，可从 [GitHub Releases](https://github.com/dongbo501/token-meter/releases) 下载对应架构的镜像包并按发布页命令导入。使用 Compose 时，将 `image` 填为 `docker load` 输出的完整镜像名，再执行 `docker compose up -d --pull never`。
 
-打开 [本地管理面板](http://127.0.0.1:8080)，用户名为 `admin`，初始密码为上面 `cat` 命令的输出。更新时，在原项目中使用新版本的 Compose 文件并重新执行 `docker compose up -d`。停用服务可运行 `docker compose down`。加上 `-v` 会同时删除配置、通知队列和账本。
+打开 [本地管理面板](http://127.0.0.1:8080)，用户名为 `admin`，初始密码为上面 `cat` 命令的输出。更新时，在原项目中运行 `docker compose pull` 和 `docker compose up -d`。停用服务可运行 `docker compose down`。加上 `-v` 会同时删除配置、通知队列和账本。
 
 ## 使用 docker run 部署
 
-镜像支持 Linux AMD64 和 ARM64。可以从 [GitHub Releases](https://github.com/dongbo501/token-meter/releases) 匿名下载，按发布页命令导入并启动。直接从 GHCR 拉取私有镜像时，可用有包读取权限的 GitHub 账号执行以下命令。
+在安装了 Docker 的主机上运行以下命令。
 
 ```sh
-gh auth token | docker login ghcr.io -u dongbo501 --password-stdin
+docker pull ghcr.io/dongbo501/token-meter:latest
 docker run -d --name token-meter --restart unless-stopped \
   --dns 172.17.0.1 --stop-timeout 150 -p 127.0.0.1:8080:8080 \
   -v token-meter-data:/data ghcr.io/dongbo501/token-meter:latest

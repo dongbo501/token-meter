@@ -28,8 +28,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=sha
+            type=raw,value=latest,priority=50,enable={{is_default_branch}}
             type=ref,event=tag
       - uses: docker/build-push-action@v6
         with:
