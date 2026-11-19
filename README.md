@@ -2,7 +2,22 @@
 
 自托管的 OpenAI 兼容接口用量管理面板。按周设置美元或 token 目标、支出上限和并发数，查看每笔结算、缓存命中率和每日用量。达标和请求错误可推送到 Bark。
 
-## 使用 GitHub 镜像
+## 使用 Compose 部署
+
+在部署目录保存仓库根目录的 [compose.yaml](https://raw.githubusercontent.com/dongbo501/token-meter/main/compose.yaml)。使用容器管理面板时，可直接将文件内容粘贴到原来的 Compose 项目，保留已有的端口和数据卷设置。在命令行部署时执行以下命令。
+
+```sh
+docker compose up -d
+docker compose exec panel cat /data/admin-password
+```
+
+Compose 会优先使用本机已有的发行镜像。首次部署时，如果 GHCR 私有镜像拉取失败，Compose 会从公开的 GitHub 仓库获取同一版本的 Dockerfile 和源码并构建，需要构建器可以访问 GitHub、Docker Hub 和 Alpine 软件源。部署目录只需一个 Compose 文件。
+
+希望跳过构建时，可从 [GitHub Releases](https://github.com/dongbo501/token-meter/releases/tag/image-8c2839f) 下载对应架构的镜像包，在部署主机按发布页的 `docker load` 命令导入，再执行 `docker compose up -d --no-build --pull never`。
+
+打开 [本地管理面板](http://127.0.0.1:8080)，用户名为 `admin`，初始密码为上面 `cat` 命令的输出。更新时，在原项目中使用新版本的 Compose 文件并重新执行 `docker compose up -d`。停用服务可运行 `docker compose down`。加上 `-v` 会同时删除配置、通知队列和账本。
+
+## 使用 docker run 部署
 
 镜像支持 Linux AMD64 和 ARM64。可以从 [GitHub Releases](https://github.com/dongbo501/token-meter/releases) 匿名下载，按发布页命令导入并启动。直接从 GHCR 拉取私有镜像时，可用有包读取权限的 GitHub 账号执行以下命令。
 
@@ -15,17 +30,6 @@ docker exec token-meter cat /data/admin-password
 ```
 
 打开 [本地管理面板](http://127.0.0.1:8080)，用户名为 `admin`，密码为最后一条命令的输出。初次启动时计划处于暂停状态。
-
-### 使用仓库中的 Compose
-
-```sh
-git clone https://github.com/dongbo501/token-meter.git
-cd token-meter
-docker compose up -d --build
-docker compose exec panel cat /data/admin-password
-```
-
-更新到已发布的镜像时，运行 `docker compose pull` 和 `docker compose up -d --no-build`。停用服务可运行 `docker compose down`。加上 `-v` 会同时删除配置、通知队列和账本。
 
 ## 设置每周 600 美元目标
 

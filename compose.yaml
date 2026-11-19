@@ -1,8 +1,8 @@
 name: token-meter
 services:
   panel:
-    image: ghcr.io/dongbo501/token-meter:latest
-    build: .
+    image: ghcr.io/dongbo501/token-meter:sha-8c2839f
+    build: "https://github.com/dongbo501/token-meter.git#8c2839f52f9539b6f13a49f7579b90b86009052d"
     pull_policy: missing
     ports:
       - "127.0.0.1:8080:8080"
