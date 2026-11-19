@@ -4,6 +4,8 @@ services:
     image: ghcr.io/dongbo501/token-meter:latest
     ports:
       - "127.0.0.1:8080:8080"
+    dns:
+      - 172.17.0.1
     environment:
       BILLING_TZ: Asia/Shanghai
       WEEK_START: "0"
